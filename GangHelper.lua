@@ -1,8 +1,8 @@
-script_name('Gang Helper - Beta')
+script_name('GangHelper')
 script_author('SeMaKa')
-script_version('2.1.1-beta')
-script_version_number(20101)
-script_description('Gang Helper 2.1.1 beta with refined scrolling, updater and bullet tracers.')
+script_version('2.1.3')
+script_version_number(20103)
+script_description('Gang Helper 2.1.3 final with GitHub updates, precise bullet traces and customizable overlays.')
 
 require 'lib.moonloader'
 
@@ -151,16 +151,19 @@ if encodingAvailable then
     encoding.default = 'CP1250'
 end
 
-local VERSION = 'v2.1.1-beta'
+local VERSION = 'v2.1.3'
 local CONFIG_NAME = 'gang_helper'
 local LEGACY_CONFIG_NAME = 'gang_helper_by_semaka'
 local DEFAULT_SENSITIVITY = 0.002500
 local GH_CHAT_PREFIX = '{202020}G{292929}a{323232}n{3B3B3B}g {444444}H{505050}e{5C5C5C}l{686868}p{747474}e{808080}r'
 local Updater = {
-    -- Replace this marker once, before distributing v2.1.1-beta. Every later
-    -- update is discovered and installed without another client pack.
-    manifestUrl = 'PASTE_HTTPS_MANIFEST_URL_HERE',
+    -- Stable public manifest. Every later release keeps the GangHelper.lua
+    -- filename and can therefore replace this script without a client pack.
+    manifestUrl = 'https://raw.githubusercontent.com/semaka47/GangHelper/main/updater/manifest.json',
     checkDelay = 2500,
+    -- Public release: check the stable manifest once after SA-MP starts.
+    -- Installation still happens only after the user confirms it in the menu.
+    automaticChecksEnabled = true,
     centerOpen = false,
     state = 'idle',
     message = '',
@@ -194,7 +197,17 @@ local Runtime = {
     changeSkinIgnoreServerUntil = 0,
     bulletRendererFailed = false,
     lastServerSkin = nil,
-    changeSkinRestoreModel = nil
+    changeSkinRestoreModel = nil,
+    reconnectPending = false,
+    reconnectAt = 0,
+    reconnectReason = '',
+    reconnectAttemptActive = false,
+    reconnectStatus = 'idle',
+    reconnectAttempts = 0,
+    lastReconnectAcceptedAt = 0,
+    suppressAutoReconnectUntil = 0,
+    injectionMessageShown = false,
+    injectionMessageQueued = false
 }
 local UI_LAYOUT = {
     menuWidth = 800,
@@ -265,8 +278,10 @@ local defaults = {
     settings = {
         language = 1,
         profile = 1,
-        theme = 1,
-        theme_mode = 1,
+        theme = 2,
+        theme_mode = 2,
+        visual_defaults_2122 = false,
+        visual_defaults_213 = false,
         open_on_delete = true,
 
         bzone_cancel_key = vkeys.VK_X,
@@ -295,28 +310,43 @@ local defaults = {
         change_skin = false,
         change_skin_id = 0,
 
+        ultra_fast_connect = false,
+        reconnect_delay = 0.75,
+        reconnect_host = '',
+        reconnect_port = 7777,
+        reconnect_name = '',
+        reconnect_remove_clan = false,
+        reconnect_clan_tag = '',
+
         auto_accept_gun = false,
         auto_accept_delay = 250,
         sellgun_distance = 8.0,
 
         keyboard_overlay = false,
         mouse_overlay = false,
-        keyboard_r = 237,
-        keyboard_g = 85,
-        keyboard_b = 101,
-        mouse_r = 237,
-        mouse_g = 85,
-        mouse_b = 101,
-        keyboard_opacity = 0.72,
-        mouse_opacity = 0.72,
-        overlay_scale = 1.0,
-        overlay_rounding = 7.0,
+        keyboard_r = 255,
+        keyboard_g = 255,
+        keyboard_b = 255,
+        keyboard_pressed_r = 142,
+        keyboard_pressed_g = 142,
+        keyboard_pressed_b = 147,
+        mouse_r = 255,
+        mouse_g = 255,
+        mouse_b = 255,
+        mouse_pressed_r = 142,
+        mouse_pressed_g = 142,
+        mouse_pressed_b = 147,
+        keyboard_opacity = 1.0,
+        mouse_opacity = 1.0,
+        overlay_scale = 0.65,
+        overlay_rounding = 10.0,
         overlay_spacing = 4.0,
         overlay_border = 1.25,
-        keyboard_x = 55,
-        keyboard_y = 390,
-        mouse_x = 650,
-        mouse_y = 470
+        overlay_shadow = 0.28,
+        keyboard_x = 24,
+        keyboard_y = 300,
+        mouse_x = 24,
+        mouse_y = 475
     }
 }
 
@@ -331,8 +361,8 @@ for _, weapon in ipairs(sensitivityWeapons) do
 end
 for _, weapon in ipairs(tradeWeapons) do
     local uppercaseName = weapon.name:upper()
-    defaults.settings['request_' .. weapon.command .. '_ro'] = '/f <<< VREAU ' .. uppercaseName .. ', ID {id} >>>'
-    defaults.settings['request_' .. weapon.command .. '_en'] = '/f <<< I WANT ' .. uppercaseName .. ', ID {id} >>>'
+    defaults.settings['request_' .. weapon.command .. '_ro'] = '<<< VREAU ' .. uppercaseName .. ', ID {id} >>>'
+    defaults.settings['request_' .. weapon.command .. '_en'] = '<<< I WANT ' .. uppercaseName .. ', ID {id} >>>'
     defaults.settings['sell_' .. weapon.command] = '/sellgun {id} ' .. weapon.command
     defaults.settings['request_alias_' .. weapon.command] = '/c' .. weapon.command
     defaults.settings['sell_alias_' .. weapon.command] = '/v' .. weapon.command
@@ -378,10 +408,11 @@ local pendingPage = nil
 local pageFade = 1.0
 local pageFadeOut = false
 local menuTargetOpen = false
+local menuDiagnosticPending = false
 local menuFade = 0.0
 local animationLastTick = 0
 local languageToggleAnim = config.settings.language == 2 and 1.0 or 0.0
-local themeToggleAnim = config.settings.theme == 2 and 1.0 or 0.0
+local themeToggleAnim = config.settings.theme == 1 and 1.0 or 0.0
 local uiFonts = { body = nil, semibold = nil, title = nil, hero = nil }
 local captureField = nil
 local captureReadyAt = 0
@@ -415,14 +446,14 @@ local translations = {
         account_section = 'CONT ȘI PREFERINȚE',
         all_settings = 'Toate setările',
         changes_saved = 'Modificări salvate',
-        version = 'VERSIUNEA ' .. VERSION,
+        version = VERSION,
         welcome = 'Bine ai venit',
         hero_text = 'Tot ce ai nevoie pentru acțiunile de gang, într-un singur loc.',
         home_about_title = 'DESPRE MOD',
         home_about_text = 'Modul a fost dezvoltat ca o soluție completă, menită să îmbine într-un singur mod **funcționalitatea, rapiditatea și confortul**. Cuprinde numeroase funcții, prescurtări, setări și opțiuni utile, atent integrate pentru a face fiecare acțiune **mai ușoară, mai intuitivă și mai accesibilă**.',
         home_update_title = 'FUNCȚIE UPDATE',
-        home_update_info = 'Clopoțelul din dreapta sus verifică dacă există o versiune nouă. Când apare punctul roșu, apasă clopoțelul și apoi „Actualizează acum”.',
-        home_update_future = 'Actualizarea se descarcă și se instalează automat. Setările tale rămân salvate, iar modul se redeschide singur când instalarea s-a terminat.',
+        home_update_info = 'Gang Helper verifică automat dacă există o versiune nouă. Dacă punctul clopoțelului devine roșu, deschide-l și apasă **Actualizează acum**.',
+        home_update_future = 'Actualizarea este verificată, instalată și pornită automat, fără să pierzi setările.',
         home_feedback_title = 'CONTACT ȘI FEEDBACK',
         home_feedback_text = 'Ai găsit un bug sau ai o sugestie, o propunere ori o idee de modificare? Contactează-mă direct pe Discord și spune-mi ce ai vrea să îmbunătățim.',
         home_discord_label = 'CONTACT DEVELOPER',
@@ -460,7 +491,7 @@ local translations = {
         auto_accept_gun = 'Acceptă automat ofertele de arme',
         auto_accept_hint = 'Detectează oferta serverului și trimite automat /accept gun ID. Dacă ești într-o mașină, oferta rămâne în așteptare și este acceptată numai după ce cobori.',
         auto_accept_delay = 'Întârziere acceptare',
-        samp_events_missing = 'Auto Accept necesită biblioteca SAMP.Lua (lib.samp.events). Restul modului funcționează normal.',
+        samp_events_missing = 'funcția Auto Accept necesită biblioteca SAMP.Lua (lib.samp.events). Restul modului funcționează normal.',
         request_command = 'Comandă pentru cerere',
         request_template = 'Comandă în limba activă',
         request_hint = 'Personalizează comanda completă și scurtătura ei. Acțiunea se execută când scrii scurtătura în chat.',
@@ -480,10 +511,10 @@ local translations = {
         sellgun_distance = 'Distanță maximă pentru țintă',
         sellgun_hint = 'Sunt acceptați doar jucători apropiați, stream-uiți, pe ecran și cu un nume vizibil. Variabile: {id}, {weapon}, {name}.',
         sell_weapon = 'Vinde',
-        sell_no_target = 'Nu există un jucător eligibil în apropiere sau numele este ascuns.',
-        sell_target = 'Ofertă pregătită pentru',
-        request_sent = 'Cerere trimisă',
-        auto_accept_sent = 'Oferta de armă a fost acceptată automat de la ID',
+        sell_no_target = 'nu există un jucător eligibil în apropiere sau numele este ascuns.',
+        sell_target = 'ofertă pregătită pentru',
+        request_sent = 'cerere trimisă',
+        auto_accept_sent = 'oferta de armă a fost acceptată automat de la ID',
         sensitivity_title = 'SENSITIVITY FIX PE ARMĂ',
         sensitivity_enable = 'Activează Sensitivity Fix',
         sensitivity_hint = 'Toate armele pornesc de la sensibilitatea reală a jocului. Modifică doar valorile dorite; cele rămase la standard nu sunt atinse. Ajustarea se aplică exclusiv cât timp ții click dreapta.',
@@ -494,14 +525,14 @@ local translations = {
         without_weapon = 'Fără armă',
         game_default = 'STANDARD JOC',
         game_default_status = 'STANDARD JOC',
-        memory_unavailable = 'Adresele de sensibilitate nu au putut fi validate. Funcția rămâne oprită.',
+        memory_unavailable = 'adresele de sensibilitate nu au putut fi validate. Funcția rămâne oprită.',
         functions_title = 'FUNCȚII UTILE',
         functions_hint = 'Funcțiile de mai jos sunt locale, reversibile și se salvează automat.',
         infinite_run = 'Infinite Run',
         infinite_run_hint = 'Păstrează stamina la maximum până când debifezi opțiunea.',
         fps_functions = 'FUNCȚII FPS',
         fps_boost = 'FPS Boost',
-        fps_boost_hint = 'Reduce procesele vizuale locale care nu țin de jucătorii sau vehiculele sincronizate SA-MP: trafic ambiental, pietoni, gunoaie, trenuri, avioane și nori, acolo unde clientul permite. Rezultatul depinde de PC și modpack.',
+        fps_boost_hint = 'Aplică optimizări locale ușoare asupra efectelor și randării clientului SA-MP. Nu modifică jucătorii, vehiculele sau datele serverului; rezultatul depinde de PC și modpack.',
         fps_lock = 'FPS Lock',
         fps_lock_hint = 'Aplică local o limită precisă, fără comenzi SA-MP și fără mesaje în chat. Valoarea implicită și maximă este 100 FPS.',
         fps_limit = 'Limită maximă FPS',
@@ -516,34 +547,60 @@ local translations = {
         world_hint = 'Ora acceptă 0–23, iar vremea folosește ID-urile stabile GTA SA 0–22. Debifarea redă controlul jocului/serverului.',
         bullet_track_title = 'BULLET-TRACK',
         bullet_track = 'Afișează direcția gloanțelor',
-        bullet_track_hint = 'Traiectorii continue cu proiectil direcțional, glow, impact și fade, colorate după jucătorul din TAB. Lungimea este limitată de raza reală a armei. Sunt procesate focurile apropiate și orice foc îndreptat spre hitboxul tău.',
+        bullet_track_hint = 'Afișează traseul real origin → target primit de la SA-MP, inclusiv focurile în aer. Lungimea respectă raza armei, iar loviturile în jucători primesc un marcaj distinct.',
         bullet_track_distance = 'Distanță locală',
         bullet_track_duration = 'Durată traseu',
-        bullet_library_missing = 'Bullet-track necesită biblioteca SAMP.Lua (lib.samp.events).',
+        bullet_library_missing = 'bullet-track necesită biblioteca SAMP.Lua (lib.samp.events).',
         change_skin_title = 'CHANGESKIN',
         change_skin = 'Activează skinul local',
         change_skin_id = 'Skin ID',
         change_skin_hint = 'Introdu direct orice ID valid 0–311 sau folosește - / +, câte un skin pe pas. Skinul rămâne după respawn; o schimbare intenționată primită de la server dezactivează override-ul.',
-        change_skin_invalid = 'ID-ul 74 nu conține un model de jucător valid în GTA San Andreas.',
-        change_skin_server = 'Serverul a schimbat skinul; Changeskin a fost dezactivat.',
+        change_skin_invalid = 'skinul 74 nu conține un model de jucător valid în GTA San Andreas.',
+        change_skin_server = 'serverul a schimbat skinul; Changeskin a fost dezactivat.',
+        reconnect_title = 'CONECTARE ȘI RECONNECT',
+        ultra_fast_connect = 'Ultra Fast Connect',
+        ultra_fast_connect_hint = 'Reîncearcă automat și rapid când serverul este plin, repornește sau conexiunea se pierde. Intervalul minim este limitat pentru a evita cereri excesive.',
+        reconnect_host = 'Server IP / DNS',
+        reconnect_port = 'Port',
+        reconnect_name = 'Nume SA-MP',
+        reconnect_remove_clan = 'Elimină clan tag-ul la reconectare',
+        reconnect_clan_tag = 'Clan tag',
+        reconnect_delay = 'Interval reîncercare',
+        reconnect_now = 'Reconectează acum',
+        reconnect_current = 'Lasă gol IP-ul sau numele pentru a folosi serverul și nickname-ul curent.',
+        reconnect_started = 'reconectarea a fost pornită.',
+        reconnect_invalid = 'completează un server valid și un port între 1 și 65535.',
+        reconnect_unavailable = 'funcțiile de reconectare nu sunt disponibile în această versiune MoonLoader/SAMPFUNCS.',
+        reconnect_idle = 'Pregătit',
+        reconnect_waiting = 'Așteaptă următoarea încercare',
+        reconnect_connecting = 'Se conectează',
         input_title = 'SUPRAPUNEREA TASTATURII',
         keyboard_enable = 'Afișează overlay-ul de tastatură',
         mouse_enable = 'Afișează overlay-ul de mouse',
         overlay_hint = 'Overlay-urile nu au fundal sau titlu. Cât timp meniul /gh este deschis, le poți trage oriunde pe ecran.',
         keyboard_color = 'Culoare tastatură',
         mouse_color = 'Culoare mouse',
+        normal_color = 'Normală',
+        pressed_color = 'Apăsată',
         select_color = 'Deschide selectorul de culoare',
         keyboard_opacity = 'Opacitate tastatură',
         mouse_opacity = 'Opacitate mouse',
-        color_picker_hint = 'Apasă pe culoare și alege vizual nuanța dorită direct din selector.',
-        menu_error = 'Interfața a întâmpinat o eroare, dar scriptul a rămas activ:',
-        font_error = 'Fontul cu diacritice nu a putut fi încărcat:',
-        overlay_error = 'Rendererul overlay-ului a întâmpinat o eroare și a fost oprit în siguranță:',
+        color_picker_hint = 'Apasă pe culoare, alege vizual nuanța sau introdu un cod HEX de forma #RRGGBB.',
+        color_hex = 'Cod HEX',
+        color_current = 'CULOARE CURENTĂ',
+        color_apply = 'Aplică',
+        color_copy = 'Copiază',
+        color_invalid = 'codul HEX trebuie să conțină exact 6 caractere valide.',
+        color_copied = 'codul culorii a fost copiat.',
+        menu_error = 'interfața a întâmpinat o eroare, dar scriptul a rămas activ:',
+        font_error = 'fontul cu diacritice nu a putut fi încărcat:',
+        overlay_error = 'rendererul overlay-ului a întâmpinat o eroare și a fost oprit în siguranță:',
         overlay_scale = 'Dimensiune overlay',
         overlay_rounding = 'Rotunjirea tastelor',
         overlay_spacing = 'Spațiere între taste',
         overlay_border = 'Grosimea conturului',
-        overlay_style_hint = 'Tastele folosesc un contur fin, umbră discretă și colțuri rotunjite. Reglajele se aplică instant tastaturii și mouse-ului.',
+        overlay_shadow = 'Intensitate umbră',
+        overlay_adjust_hint = 'Ajustează doar dimensiunea, rotunjirea, spațierea și umbra. Modelul curat al tastelor rămâne același.',
         appearance = 'ASPECT',
         language = 'Limba interfeței',
         language_hint = 'Textele se schimbă instant între română și engleză.',
@@ -555,22 +612,23 @@ local translations = {
         open_delete = 'Deschide meniul cu tasta Del',
         open_delete_hint = 'Tasta Del este ignorată când scrii în chat sau ai un dialog SA-MP deschis.',
         reset_all = 'Resetează toate setările',
-        reset_done = 'Toate setările au fost resetate.',
-        notifications_update = 'NOTIFICĂRI ȘI UPDATE',
+        reset_done = 'toate setările au fost resetate.',
+        notifications_update = 'ACTUALIZĂRI',
+        update_center_title = 'ACTUALIZĂRI',
         update_check = 'Verifică update',
         update_now = 'Actualizează acum',
         update_later = 'Mai târziu',
-        update_idle = 'Apasă „Verifică update” pentru a vedea dacă există o versiune nouă.',
+        update_idle = 'Apasă butonul de mai jos pentru a verifica dacă există o versiune nouă.',
         update_checking = 'Se caută o versiune nouă...',
-        update_current = 'Gang Helper este actualizat. Nu trebuie să faci nimic.',
-        update_available = 'Este disponibilă versiunea',
+        update_current = 'Folosești cea mai nouă versiune Gang Helper.',
+        update_available = 'O versiune nouă este disponibilă:',
         update_downloading = 'Se descarcă versiunea nouă...',
         update_installing = 'Update-ul este pregătit și se instalează...',
-        update_error = 'Actualizarea nu a putut fi terminată. Verifică internetul și încearcă din nou.',
-        update_unconfigured = 'Verificarea automată nu este disponibilă momentan. Modul poate fi folosit în continuare.',
-        update_auto_check = 'Anunță-mă automat când apare un update',
+        update_error = 'Nu am putut verifica sau instala actualizarea. Verifică internetul și încearcă din nou.',
+        update_unconfigured = 'Verificarea update-urilor nu este disponibilă momentan.',
+        update_auto_check = 'Verifică automat la pornire',
         update_changelog = 'NOUTĂȚI ÎN VERSIUNEA NOUĂ',
-        update_backup = 'Update-ul se instalează automat, iar setările tale rămân salvate.',
+        update_backup = 'Apasă Actualizează acum. Gang Helper descarcă și verifică versiunea nouă, apoi se reîncarcă singur. Setările tale rămân salvate.',
         close = 'Închide',
         romanian = 'Română',
         english = 'English',
@@ -588,11 +646,11 @@ local translations = {
         shortcut_slot = 'Scurtătura',
         shortcuts_library_missing = 'Scurtăturile necesită biblioteca SAMP.Lua (lib.samp.events).',
         contact_developer = 'CONTACT DEVELOPER',
-        discord_contact = 'Discord: semaka47',
+        discord_contact = 'semaka47',
         contact_hint = 'Contactează dezvoltatorul pentru buguri, sugestii sau modificări ale modului.',
         command_saved = 'Comanda este salvată automat',
-        no_weapon = 'Nu ai arma configurată în inventar.',
-        bind_saved = 'Bind salvat',
+        no_weapon = 'nu ai arma configurată în inventar.',
+        bind_saved = 'bind salvat',
         unbound = 'FĂRĂ TASTĂ'
     },
     en = {
@@ -609,14 +667,14 @@ local translations = {
         account_section = 'ACCOUNT & PREFERENCES',
         all_settings = 'All settings',
         changes_saved = 'Changes saved',
-        version = 'VERSION ' .. VERSION,
+        version = VERSION,
         welcome = 'Welcome',
         hero_text = 'Everything you need for gang activity, in one place.',
         home_about_title = 'ABOUT THE MOD',
         home_about_text = 'The mod was developed as a complete solution designed to combine **functionality, speed, and comfort** in one place. It includes numerous useful features, shortcuts, settings, and options, carefully integrated to make every action **easier, more intuitive, and more accessible**.',
         home_update_title = 'UPDATE FEATURE',
-        home_update_info = 'The bell in the top-right checks for a new version. When the red dot appears, press the bell and then “Update now”.',
-        home_update_future = 'The update downloads and installs automatically. Your settings stay saved, and the mod reloads when installation is complete.',
+        home_update_info = 'Gang Helper automatically checks for a new version. If the bell dot turns red, open it and press **Update now**.',
+        home_update_future = 'The update is verified, installed, and started automatically without losing your settings.',
         home_feedback_title = 'CONTACT & FEEDBACK',
         home_feedback_text = 'Found a bug, have a suggestion, a proposal, or an idea for a change? Contact me directly on Discord and tell me what you would like to improve.',
         home_discord_label = 'CONTACT DEVELOPER',
@@ -654,7 +712,7 @@ local translations = {
         auto_accept_gun = 'Automatically accept gun offers',
         auto_accept_hint = 'Detects the server offer and automatically sends /accept gun ID. If you are in a vehicle, the offer waits and is accepted only after you get out.',
         auto_accept_delay = 'Accept delay',
-        samp_events_missing = 'Auto Accept requires SAMP.Lua (lib.samp.events). The rest of the mod works normally.',
+        samp_events_missing = 'the Auto Accept feature requires SAMP.Lua (lib.samp.events). The rest of the mod works normally.',
         request_command = 'Weapon request command',
         request_template = 'Active-language command',
         request_hint = 'Customize the complete command and its shortcut. The action runs when you type the shortcut in chat.',
@@ -674,10 +732,10 @@ local translations = {
         sellgun_distance = 'Maximum target distance',
         sellgun_hint = 'Only nearby, streamed, on-screen players with a visible name are accepted. Variables: {id}, {weapon}, {name}.',
         sell_weapon = 'Sell',
-        sell_no_target = 'No eligible nearby player was found or the name is hidden.',
-        sell_target = 'Offer prepared for',
-        request_sent = 'Request sent',
-        auto_accept_sent = 'Gun offer automatically accepted from ID',
+        sell_no_target = 'no eligible nearby player was found or the name is hidden.',
+        sell_target = 'offer prepared for',
+        request_sent = 'request sent',
+        auto_accept_sent = 'gun offer automatically accepted from ID',
         sensitivity_title = 'PER-WEAPON SENSITIVITY FIX',
         sensitivity_enable = 'Enable Sensitivity Fix',
         sensitivity_hint = 'Every weapon starts at the game\'s real sensitivity. Change only the values you need; values left at default are never touched. Adjustments apply only while right-click aiming.',
@@ -688,14 +746,14 @@ local translations = {
         without_weapon = 'Without weapon',
         game_default = 'GAME DEFAULT',
         game_default_status = 'GAME DEFAULT',
-        memory_unavailable = 'Sensitivity addresses could not be validated. The feature remains disabled.',
+        memory_unavailable = 'sensitivity addresses could not be validated. The feature remains disabled.',
         functions_title = 'UTILITY FUNCTIONS',
         functions_hint = 'The functions below are local, reversible, and saved automatically.',
         infinite_run = 'Infinite Run',
         infinite_run_hint = 'Keeps stamina at maximum until the option is disabled.',
         fps_functions = 'FPS FUNCTIONS',
         fps_boost = 'FPS Boost',
-        fps_boost_hint = 'Reduces local visual work unrelated to synchronized SA-MP players or vehicles: ambient traffic, pedestrians, rubbish, trains, planes, and clouds where supported. Results depend on the PC and modpack.',
+        fps_boost_hint = 'Applies lightweight local optimizations to SA-MP client effects and rendering. It does not alter players, vehicles, or server data; results depend on the PC and modpack.',
         fps_lock = 'FPS Lock',
         fps_lock_hint = 'Applies a precise local cap without SA-MP commands or chat messages. The default and maximum value is 100 FPS.',
         fps_limit = 'Maximum FPS limit',
@@ -710,34 +768,60 @@ local translations = {
         world_hint = 'Time accepts 0–23 and weather uses the stable GTA SA IDs 0–22. Disabling gives control back to the game/server.',
         bullet_track_title = 'BULLET-TRACK',
         bullet_track = 'Show bullet direction',
-        bullet_track_hint = 'Continuous trajectories with a directional projectile, glow, impact, and fade, colored from each player’s TAB color. Length is capped to the weapon’s real range. Nearby shots and every shot aimed at your hitbox are processed.',
+        bullet_track_hint = 'Shows the real origin → target path received from SA-MP, including shots fired into the air. Length follows the weapon range, and player hits receive a distinct marker.',
         bullet_track_distance = 'Local distance',
         bullet_track_duration = 'Trace duration',
-        bullet_library_missing = 'Bullet-track requires SAMP.Lua (lib.samp.events).',
+        bullet_library_missing = 'bullet-track requires SAMP.Lua (lib.samp.events).',
         change_skin_title = 'CHANGESKIN',
         change_skin = 'Enable local skin',
         change_skin_id = 'Skin ID',
         change_skin_hint = 'Enter any valid ID from 0–311 directly or use - / + one skin at a time. The skin persists after respawn; an intentional server skin change disables the override.',
-        change_skin_invalid = 'ID 74 does not contain a valid player model in GTA San Andreas.',
-        change_skin_server = 'The server changed your skin; Changeskin was disabled.',
+        change_skin_invalid = 'skin 74 does not contain a valid player model in GTA San Andreas.',
+        change_skin_server = 'the server changed your skin; Changeskin was disabled.',
+        reconnect_title = 'CONNECTION AND RECONNECT',
+        ultra_fast_connect = 'Ultra Fast Connect',
+        ultra_fast_connect_hint = 'Retries quickly when the server is full, restarts, or the connection is lost. A safe minimum interval prevents excessive requests.',
+        reconnect_host = 'Server IP / DNS',
+        reconnect_port = 'Port',
+        reconnect_name = 'SA-MP name',
+        reconnect_remove_clan = 'Remove clan tag on reconnect',
+        reconnect_clan_tag = 'Clan tag',
+        reconnect_delay = 'Retry interval',
+        reconnect_now = 'Reconnect now',
+        reconnect_current = 'Leave the IP or name blank to use the current server and nickname.',
+        reconnect_started = 'reconnect has started.',
+        reconnect_invalid = 'enter a valid server and a port between 1 and 65535.',
+        reconnect_unavailable = 'reconnect functions are unavailable in this MoonLoader/SAMPFUNCS version.',
+        reconnect_idle = 'Ready',
+        reconnect_waiting = 'Waiting for the next attempt',
+        reconnect_connecting = 'Connecting',
         input_title = 'KEYBOARD OVERLAY',
         keyboard_enable = 'Show keyboard overlay',
         mouse_enable = 'Show mouse overlay',
         overlay_hint = 'The overlays have no background or title. While /gh is open, you can drag them anywhere on the screen.',
         keyboard_color = 'Keyboard color',
         mouse_color = 'Mouse color',
+        normal_color = 'Normal',
+        pressed_color = 'Pressed',
         select_color = 'Open the color picker',
         keyboard_opacity = 'Keyboard opacity',
         mouse_opacity = 'Mouse opacity',
-        color_picker_hint = 'Click the color and choose the desired shade visually in the picker.',
-        menu_error = 'The interface encountered an error, but the script remained active:',
-        font_error = 'The font containing Romanian glyphs could not be loaded:',
-        overlay_error = 'The overlay renderer encountered an error and was safely stopped:',
+        color_picker_hint = 'Click the color, choose a shade visually, or enter a #RRGGBB HEX code.',
+        color_hex = 'HEX code',
+        color_current = 'CURRENT COLOR',
+        color_apply = 'Apply',
+        color_copy = 'Copy',
+        color_invalid = 'the HEX code must contain exactly 6 valid characters.',
+        color_copied = 'the color code was copied.',
+        menu_error = 'the interface encountered an error, but the script remained active:',
+        font_error = 'the font containing Romanian glyphs could not be loaded:',
+        overlay_error = 'the overlay renderer encountered an error and was safely stopped:',
         overlay_scale = 'Overlay size',
         overlay_rounding = 'Key rounding',
         overlay_spacing = 'Key spacing',
         overlay_border = 'Border thickness',
-        overlay_style_hint = 'Keys use a subtle outline, soft shadow, and rounded corners. Changes apply instantly to keyboard and mouse.',
+        overlay_shadow = 'Shadow strength',
+        overlay_adjust_hint = 'Adjust only size, rounding, spacing, and shadow. The clean key design always stays the same.',
         appearance = 'APPEARANCE',
         language = 'Interface language',
         language_hint = 'Text switches instantly between Romanian and English.',
@@ -749,22 +833,23 @@ local translations = {
         open_delete = 'Open the menu with the Del key',
         open_delete_hint = 'The Del key is ignored while typing in chat or while a SA-MP dialog is open.',
         reset_all = 'Reset all settings',
-        reset_done = 'All settings have been reset.',
-        notifications_update = 'NOTIFICATIONS & UPDATE',
+        reset_done = 'all settings have been reset.',
+        notifications_update = 'UPDATES',
+        update_center_title = 'UPDATES',
         update_check = 'Check for updates',
         update_now = 'Update now',
         update_later = 'Later',
-        update_idle = 'Press “Check for updates” to see whether a new version is available.',
+        update_idle = 'Press the button below to check whether a new version is available.',
         update_checking = 'Looking for a new version...',
-        update_current = 'Gang Helper is up to date. You do not need to do anything.',
-        update_available = 'Available version',
+        update_current = 'You are using the newest Gang Helper version.',
+        update_available = 'A new version is available:',
         update_downloading = 'Downloading the new version...',
         update_installing = 'The update is ready and is being installed...',
-        update_error = 'The update could not be completed. Check your connection and try again.',
-        update_unconfigured = 'Automatic update checks are temporarily unavailable. The mod can still be used normally.',
-        update_auto_check = 'Notify me automatically when an update appears',
+        update_error = 'The update could not be checked or installed. Check your connection and try again.',
+        update_unconfigured = 'Update checking is temporarily unavailable.',
+        update_auto_check = 'Check automatically at startup',
         update_changelog = 'WHAT IS NEW',
-        update_backup = 'The update installs automatically and keeps your settings.',
+        update_backup = 'Press Update now. Gang Helper downloads and verifies the new version, then reloads itself. Your settings stay saved.',
         close = 'Close',
         romanian = 'Romana',
         english = 'English',
@@ -782,11 +867,11 @@ local translations = {
         shortcut_slot = 'Shortcut',
         shortcuts_library_missing = 'Shortcuts require SAMP.Lua (lib.samp.events).',
         contact_developer = 'CONTACT DEVELOPER',
-        discord_contact = 'Discord: semaka47',
+        discord_contact = 'semaka47',
         contact_hint = 'Contact the developer for bugs, suggestions, or changes to the mod.',
         command_saved = 'The command is saved automatically',
-        no_weapon = 'The configured weapon is not in your inventory.',
-        bind_saved = 'Keybind saved',
+        no_weapon = 'the configured weapon is not in your inventory.',
+        bind_saved = 'keybind saved',
         unbound = 'UNBOUND'
     }
 }
@@ -847,6 +932,22 @@ local function clampSettings()
     local s = config.settings
     s.language = clamp(tonumber(s.language) or 1, 1, 2)
     s.profile = clamp(tonumber(s.profile) or 1, 1, 2)
+    if s.visual_defaults_2122 ~= true then
+        s.theme_mode = 2
+        s.keyboard_r, s.keyboard_g, s.keyboard_b = 255, 255, 255
+        s.mouse_r, s.mouse_g, s.mouse_b = 255, 255, 255
+        s.visual_defaults_2122 = true
+    end
+    if s.visual_defaults_213 ~= true then
+        -- One-time visual migration: a selected white overlay must render as
+        -- actual white keys, not as a grey translucent outline.
+        s.keyboard_r, s.keyboard_g, s.keyboard_b = 255, 255, 255
+        s.mouse_r, s.mouse_g, s.mouse_b = 255, 255, 255
+        s.keyboard_opacity, s.mouse_opacity = 1.0, 1.0
+        s.overlay_shadow = 0.28
+        s.overlay_rounding = 10.0
+        s.visual_defaults_213 = true
+    end
     s.theme_mode = clamp(tonumber(s.theme_mode) or 1, 1, #themes)
     s.theme = s.theme_mode
     if s.open_on_delete == nil then
@@ -876,9 +977,18 @@ local function clampSettings()
     s.bullet_track_distance = clamp(tonumber(s.bullet_track_distance)
         or defaults.settings.bullet_track_distance, 10.0, 100.0)
     s.bullet_track_duration = clamp(tonumber(s.bullet_track_duration)
-        or defaults.settings.bullet_track_duration, 0.25, 2.0)
+        or defaults.settings.bullet_track_duration, 0.25, 5.0)
     s.change_skin = s.change_skin == true
     s.change_skin_id = clamp(tonumber(s.change_skin_id) or defaults.settings.change_skin_id, 0, 311)
+    s.ultra_fast_connect = s.ultra_fast_connect == true and sampEventsAvailable
+    s.reconnect_delay = clamp(tonumber(s.reconnect_delay)
+        or defaults.settings.reconnect_delay, 0.50, 5.00)
+    s.reconnect_host = tostring(s.reconnect_host or ''):sub(1, 127)
+    s.reconnect_port = clamp(math.floor(tonumber(s.reconnect_port)
+        or defaults.settings.reconnect_port), 1, 65535)
+    s.reconnect_name = tostring(s.reconnect_name or ''):sub(1, 24)
+    s.reconnect_remove_clan = s.reconnect_remove_clan == true
+    s.reconnect_clan_tag = tostring(s.reconnect_clan_tag or ''):sub(1, 16)
     s.auto_accept_gun = s.auto_accept_gun == true
     if s.auto_accept_gun and not sampEventsAvailable then
         s.auto_accept_gun = false
@@ -901,6 +1011,13 @@ local function clampSettings()
         if s[enField] == '/f [<<< I need ' .. weapon.name .. ', ID {id} >>>]' then
             s[enField] = defaults.settings[enField]
         end
+        local uppercaseName = weapon.name:upper()
+        if s[roField] == '/f <<< VREAU ' .. uppercaseName .. ', ID {id} >>>' then
+            s[roField] = defaults.settings[roField]
+        end
+        if s[enField] == '/f <<< I WANT ' .. uppercaseName .. ', ID {id} >>>' then
+            s[enField] = defaults.settings[enField]
+        end
     end
     for slot = 1, 10 do
         local fullField = 'shortcut_full_' .. slot
@@ -911,20 +1028,32 @@ local function clampSettings()
     s.sellgun_distance = clamp(tonumber(s.sellgun_distance) or 8.0, 2.0, 25.0)
     s.keyboard_overlay = s.keyboard_overlay == true
     s.mouse_overlay = s.mouse_overlay == true
-    for _, prefix in ipairs({ 'keyboard', 'mouse' }) do
+    for _, prefix in ipairs({ 'keyboard', 'keyboard_pressed', 'mouse', 'mouse_pressed' }) do
         s[prefix .. '_r'] = clamp(tonumber(s[prefix .. '_r']) or defaults.settings[prefix .. '_r'], 0, 255)
         s[prefix .. '_g'] = clamp(tonumber(s[prefix .. '_g']) or defaults.settings[prefix .. '_g'], 0, 255)
         s[prefix .. '_b'] = clamp(tonumber(s[prefix .. '_b']) or defaults.settings[prefix .. '_b'], 0, 255)
-        s[prefix .. '_opacity'] = clamp(tonumber(s[prefix .. '_opacity']) or defaults.settings[prefix .. '_opacity'], 0.0, 1.0)
+        if (prefix == 'keyboard' or prefix == 'mouse')
+                and s[prefix .. '_r'] == 237 and s[prefix .. '_g'] == 85
+                and s[prefix .. '_b'] == 101 then
+            s[prefix .. '_r'], s[prefix .. '_g'], s[prefix .. '_b'] = 255, 255, 255
+        end
     end
-    s.overlay_scale = clamp(tonumber(s.overlay_scale) or 1.0, 0.25, 1.5)
+    for _, prefix in ipairs({ 'keyboard', 'mouse' }) do
+        s[prefix .. '_opacity'] = clamp(tonumber(s[prefix .. '_opacity'])
+            or defaults.settings[prefix .. '_opacity'], 0.0, 1.0)
+    end
+    s.overlay_scale = clamp(tonumber(s.overlay_scale) or defaults.settings.overlay_scale, 0.25, 0.75)
     s.overlay_rounding = clamp(tonumber(s.overlay_rounding) or 7.0, 0.0, 12.0)
     s.overlay_spacing = clamp(tonumber(s.overlay_spacing) or 4.0, 2.0, 8.0)
     s.overlay_border = clamp(tonumber(s.overlay_border) or 1.25, 0.75, 3.0)
-    s.keyboard_x = tonumber(s.keyboard_x) or 55
-    s.keyboard_y = tonumber(s.keyboard_y) or 390
-    s.mouse_x = tonumber(s.mouse_x) or 650
-    s.mouse_y = tonumber(s.mouse_y) or 470
+    -- Removed in v2.1.3: the overlay now has one consistent clean design.
+    s.overlay_style = nil
+    s.overlay_shadow = clamp(tonumber(s.overlay_shadow)
+        or defaults.settings.overlay_shadow, 0.0, 0.65)
+    s.keyboard_x = tonumber(s.keyboard_x) or defaults.settings.keyboard_x
+    s.keyboard_y = tonumber(s.keyboard_y) or defaults.settings.keyboard_y
+    s.mouse_x = tonumber(s.mouse_x) or defaults.settings.mouse_x
+    s.mouse_y = tonumber(s.mouse_y) or defaults.settings.mouse_y
 
     local keyFields = {
         'bzone_cancel_key', 'bzone_cocaine_key', 'bzone_meth_key',
@@ -953,10 +1082,31 @@ local function clampSettings()
 end
 
 clampSettings()
+themeToggleAnim = config.settings.theme == 1 and 1.0 or 0.0
 inicfg.save(config, CONFIG_NAME)
 
 local keyboardColorPicker = uiFloat4()
+local keyboardPressedColorPicker = uiFloat4()
 local mouseColorPicker = uiFloat4()
+local mousePressedColorPicker = uiFloat4()
+Runtime.uiBuffers = {
+    keyboardHex = uiBuffer(8),
+    keyboardPressedHex = uiBuffer(8),
+    mouseHex = uiBuffer(8),
+    mousePressedHex = uiBuffer(8),
+    reconnectHost = uiBuffer(129),
+    reconnectName = uiBuffer(25),
+    reconnectClan = uiBuffer(17)
+}
+local colorBufferNames = {
+    keyboard = 'keyboardHex',
+    keyboard_pressed = 'keyboardPressedHex',
+    mouse = 'mouseHex',
+    mouse_pressed = 'mousePressedHex'
+}
+local function colorHexBuffer(prefix)
+    return Runtime.uiBuffers[colorBufferNames[prefix]]
+end
 local romanianGlyphRanges = ffi.new('unsigned short[5]', { 0x0020, 0x024F, 0x2013, 0x2014, 0 })
 local legacyRomanianGlyphRanges = nil
 
@@ -974,6 +1124,13 @@ local function getTextBuffer(buffer)
     return legacyImgui and buffer.v or ffi.string(buffer)
 end
 
+function Runtime.colorHex(prefix)
+    return string.format('#%02X%02X%02X',
+        math.floor(clamp(tonumber(config.settings[prefix .. '_r']) or 0, 0, 255) + 0.5),
+        math.floor(clamp(tonumber(config.settings[prefix .. '_g']) or 0, 0, 255) + 0.5),
+        math.floor(clamp(tonumber(config.settings[prefix .. '_b']) or 0, 0, 255) + 0.5))
+end
+
 local function getInlineCommandBuffer(field)
     if not commandInlineBuffers[field] then
         commandInlineBuffers[field] = uiBuffer(257)
@@ -987,10 +1144,27 @@ local function syncTextBuffers()
     uiSet(keyboardColorPicker, config.settings.keyboard_g / 255, 1)
     uiSet(keyboardColorPicker, config.settings.keyboard_b / 255, 2)
     uiSet(keyboardColorPicker, 1.0, 3)
+    uiSet(keyboardPressedColorPicker, config.settings.keyboard_pressed_r / 255, 0)
+    uiSet(keyboardPressedColorPicker, config.settings.keyboard_pressed_g / 255, 1)
+    uiSet(keyboardPressedColorPicker, config.settings.keyboard_pressed_b / 255, 2)
+    uiSet(keyboardPressedColorPicker, 1.0, 3)
     uiSet(mouseColorPicker, config.settings.mouse_r / 255, 0)
     uiSet(mouseColorPicker, config.settings.mouse_g / 255, 1)
     uiSet(mouseColorPicker, config.settings.mouse_b / 255, 2)
     uiSet(mouseColorPicker, 1.0, 3)
+    uiSet(mousePressedColorPicker, config.settings.mouse_pressed_r / 255, 0)
+    uiSet(mousePressedColorPicker, config.settings.mouse_pressed_g / 255, 1)
+    uiSet(mousePressedColorPicker, config.settings.mouse_pressed_b / 255, 2)
+    uiSet(mousePressedColorPicker, 1.0, 3)
+    setTextBuffer(Runtime.uiBuffers.keyboardHex, 8, Runtime.colorHex('keyboard'))
+    setTextBuffer(Runtime.uiBuffers.keyboardPressedHex, 8,
+        Runtime.colorHex('keyboard_pressed'))
+    setTextBuffer(Runtime.uiBuffers.mouseHex, 8, Runtime.colorHex('mouse'))
+    setTextBuffer(Runtime.uiBuffers.mousePressedHex, 8,
+        Runtime.colorHex('mouse_pressed'))
+    setTextBuffer(Runtime.uiBuffers.reconnectHost, 129, config.settings.reconnect_host)
+    setTextBuffer(Runtime.uiBuffers.reconnectName, 25, config.settings.reconnect_name)
+    setTextBuffer(Runtime.uiBuffers.reconnectClan, 17, config.settings.reconnect_clan_tag)
 end
 
 syncTextBuffers()
@@ -1028,9 +1202,17 @@ end
 local function requestMenu(open)
     menuTargetOpen = open == true
     if menuTargetOpen then
+        menuDiagnosticPending = true
+        print('[Gang Helper] menu checkpoint: open requested')
         uiSet(windowOpen, true)
     else
         captureField = nil
+    end
+end
+
+local function menuCheckpoint(stage)
+    if menuDiagnosticPending then
+        print('[Gang Helper] menu checkpoint: ' .. tostring(stage))
     end
 end
 
@@ -1061,7 +1243,7 @@ local function updateInterfaceAnimations()
     languageToggleAnim = smoothValue(languageToggleAnim,
         config.settings.language == 2 and 1.0 or 0.0, 14.0, deltaTime)
     themeToggleAnim = smoothValue(themeToggleAnim,
-        config.settings.theme == 2 and 1.0 or 0.0, 14.0, deltaTime)
+        config.settings.theme == 1 and 1.0 or 0.0, 14.0, deltaTime)
 
     if pendingPage and pageFadeOut then
         pageFade = math.max(0.0, pageFade - deltaTime * 10.0)
@@ -1347,15 +1529,34 @@ local function ghChat(message)
 end
 
 local function showInjectionMessage()
-    local message
+    local firstLine, secondLine
     if config.settings.language == 2 then
-        message = GH_CHAT_PREFIX
-            .. ' {FFFFFF}loaded successfully. Use the {808080}Del {FFFFFF}key or the {808080}/gh'
+        firstLine = GH_CHAT_PREFIX .. ' {FFFFFF}was injected successfully.'
+        secondLine = '{FFFFFF}Use the {808080}Del {FFFFFF}key or the {808080}/gh {FFFFFF}command.'
     else
-        message = GH_CHAT_PREFIX
-            .. ' {FFFFFF}s-a incarcat cu succes. Foloseste tasta {808080}Del {FFFFFF}sau comanda {808080}/gh'
+        firstLine = GH_CHAT_PREFIX .. ' {FFFFFF}s-a injectat cu succes.'
+        secondLine = '{FFFFFF}Foloseste tasta {808080}Del {FFFFFF}sau comanda {808080}/gh'
     end
-    sampAddChatMessage(toGameEncoding(message), -1)
+    -- SA-MP truncates long chat entries. Keep the gradient on the first line
+    -- and the full instruction on a separate short line.
+    sampAddChatMessage(toGameEncoding(firstLine), -1)
+    sampAddChatMessage(toGameEncoding(secondLine), -1)
+end
+
+function Runtime.queueInjectionMessage()
+    if Runtime.injectionMessageShown or Runtime.injectionMessageQueued then
+        return
+    end
+    Runtime.injectionMessageQueued = true
+    lua_thread.create(function()
+        -- Exactly one frame after SA-MP becomes available. The previous build
+        -- waited for a later connection/spawn callback even though this
+        -- thread already contained wait(0).
+        wait(0)
+        local shown = pcall(showInjectionMessage)
+        Runtime.injectionMessageQueued = false
+        Runtime.injectionMessageShown = shown == true
+    end)
 end
 
 Updater.sha256K = {
@@ -1504,8 +1705,10 @@ function Updater.processUpdateManifest(path)
     local version = tostring(manifest.version or '')
     local downloadUrl = tostring(manifest.download_url or manifest.download or '')
     local expectedHash = tostring(manifest.sha256 or ''):lower()
+    local requestedFileName = tostring(manifest.file_name or '')
     if version == '' or not downloadUrl:match('^https://') or not expectedHash:match('^[0-9a-f]+$')
-            or #expectedHash ~= 64 then
+            or #expectedHash ~= 64
+            or (requestedFileName ~= '' and requestedFileName ~= 'GangHelper.lua') then
         Updater.setUpdateError('câmpuri manifest invalide / invalid manifest fields')
         return
     end
@@ -1539,7 +1742,10 @@ function Updater.checkForUpdates()
     Updater.state = 'checking'
     Updater.message = ''
     local completed = false
-    local startedOk = pcall(downloadUrlToFile, Updater.manifestUrl, manifestPath,
+    local separator = Updater.manifestUrl:find('?', 1, true) and '&' or '?'
+    local requestUrl = Updater.manifestUrl .. separator .. 'gh_nocache='
+        .. tostring(os.time()) .. tostring(getGameTimer())
+    local startedOk = pcall(downloadUrlToFile, requestUrl, manifestPath,
         function(_, status)
             if (status == downloadStatus.STATUS_ENDDOWNLOADDATA
                     or status == downloadStatus.STATUSEX_ENDDOWNLOAD) and not completed then
@@ -1572,7 +1778,12 @@ function Updater.installAvailableUpdate()
     end
     local scriptPath = thisScript().path
     local temporaryPath = scriptPath .. '.gh-update.tmp'
-    local backupPath = scriptPath .. '.gh-backup.lua'
+    local backupPath = scriptPath .. '.gh-backup'
+    local scriptDirectory = scriptPath:match('^(.*[\\/])') or ''
+    local requestedFileName = tostring(Updater.manifest.file_name or '')
+    local installPath = requestedFileName ~= ''
+        and (scriptDirectory .. requestedFileName) or scriptPath
+    local replacedBackupPath = installPath .. '.gh-replaced-backup'
     pcall(os.remove, temporaryPath)
     Updater.state = 'downloading'
     Updater.progress = 0.0
@@ -1609,15 +1820,31 @@ function Updater.installAvailableUpdate()
 
                 Updater.state = 'installing'
                 pcall(os.remove, backupPath)
+                pcall(os.remove, replacedBackupPath)
+                local replacedExisting = false
+                if installPath ~= scriptPath and doesFileExist(installPath) then
+                    replacedExisting = os.rename(installPath, replacedBackupPath) == true
+                    if not replacedExisting then
+                        pcall(os.remove, temporaryPath)
+                        Updater.setUpdateError('fișierul versiunii noi nu a putut fi pregătit')
+                        return
+                    end
+                end
                 local backedUp, backupError = os.rename(scriptPath, backupPath)
                 if not backedUp then
+                    if replacedExisting then
+                        os.rename(replacedBackupPath, installPath)
+                    end
                     pcall(os.remove, temporaryPath)
                     Updater.setUpdateError('backup eșuat: ' .. tostring(backupError))
                     return
                 end
-                local installed, installError = os.rename(temporaryPath, scriptPath)
+                local installed, installError = os.rename(temporaryPath, installPath)
                 if not installed then
                     os.rename(backupPath, scriptPath)
+                    if replacedExisting then
+                        os.rename(replacedBackupPath, installPath)
+                    end
                     Updater.setUpdateError('instalare eșuată: ' .. tostring(installError))
                     return
                 end
@@ -1625,7 +1852,11 @@ function Updater.installAvailableUpdate()
                 Updater.progress = 1.0
                 lua_thread.create(function()
                     wait(650)
-                    thisScript():reload()
+                    if installPath == scriptPath then
+                        thisScript():reload()
+                    else
+                        reloadScripts()
+                    end
                 end)
             end
         end)
@@ -1756,50 +1987,83 @@ end
 
 local pageIconKinds = { 'home', 'weapon', 'sensitivity', 'functions', 'overlay', 'shortcut', 'settings' }
 
-local function drawIosIcon(kind, x, y, size, selected)
+-- Supersampled 48x48 scan mask traced from the supplied Discord reference.
+-- Each row contains one or more inclusive horizontal runs. At runtime these
+-- become overlapping rounded capsules, so the mark remains smooth and needs
+-- no PNG, texture handle, custom font or unsafe polygon call.
+local DISCORD_REFERENCE_ROWS = {
+    { 7, { 13, 17 }, { 30, 34 } },
+    { 8, { 11, 14 }, { 33, 36 } },
+    { 9, { 9, 12 }, { 17, 30 }, { 35, 38 } },
+    { 10, { 7, 10 }, { 13, 34 }, { 37, 40 } },
+    { 11, { 6, 9 }, { 11, 36 }, { 38, 41 } },
+    { 12, { 6, 41 } }, { 13, { 5, 42 } }, { 14, { 5, 42 } },
+    { 15, { 4, 43 } }, { 16, { 4, 43 } },
+    { 17, { 3, 44 } }, { 18, { 3, 44 } }, { 19, { 3, 44 } },
+    { 20, { 2, 45 } }, { 21, { 2, 45 } },
+    { 22, { 2, 14 }, { 19, 28 }, { 33, 45 } },
+    { 23, { 2, 13 }, { 20, 27 }, { 34, 45 } },
+    { 24, { 1, 12 }, { 20, 27 }, { 35, 46 } },
+    { 25, { 1, 12 }, { 21, 26 }, { 35, 46 } },
+    { 26, { 1, 12 }, { 21, 26 }, { 35, 46 } },
+    { 27, { 1, 12 }, { 21, 26 }, { 35, 46 } },
+    { 28, { 1, 13 }, { 20, 27 }, { 34, 46 } },
+    { 29, { 1, 13 }, { 19, 28 }, { 33, 46 } },
+    { 30, { 0, 47 } }, { 31, { 0, 47 } },
+    { 32, { 0, 47 } }, { 33, { 0, 47 } },
+    { 34, { 0, 7 }, { 9, 38 }, { 40, 47 } },
+    { 35, { 1, 8 }, { 11, 36 }, { 39, 46 } },
+    { 36, { 2, 10 }, { 14, 33 }, { 37, 45 } },
+    { 37, { 3, 11 }, { 17, 30 }, { 36, 44 } },
+    { 38, { 4, 14 }, { 33, 43 } },
+    { 39, { 6, 15 }, { 32, 41 } },
+    { 40, { 9, 14 }, { 33, 38 } }
+}
+
+local function drawIosIconLegacy(kind, x, y, size, selected)
     local drawList = imgui.GetWindowDrawList()
     local theme = themes[config.settings.theme]
     local strokeU32 = imgui.GetColorU32(selected and theme.text or theme.muted)
-    local left, top = x + size * 0.16, y + size * 0.16
-    local right, bottom = x + size * 0.84, y + size * 0.84
+    local left, top = x + size * 0.11, y + size * 0.11
+    local right, bottom = x + size * 0.89, y + size * 0.89
     local cx, cy = x + size * 0.5, y + size * 0.5
-    local thickness = math.max(1.15, size * 0.072)
+    local thickness = math.max(1.35, size * 0.082)
     local function line(ax, ay, bx, by, customThickness)
         drawList:AddLine(imgui.ImVec2(ax, ay), imgui.ImVec2(bx, by),
             strokeU32, customThickness or thickness)
     end
     local function rect(ax, ay, bx, by, rounding)
         drawList:AddRect(imgui.ImVec2(ax, ay), imgui.ImVec2(bx, by),
-            strokeU32, rounding or 2.0, 0, thickness)
+            strokeU32, rounding or size * 0.09, 0, thickness)
+    end
+    local function filledRect(ax, ay, bx, by, rounding, fillColor)
+        drawList:AddRectFilled(imgui.ImVec2(ax, ay), imgui.ImVec2(bx, by),
+            fillColor or strokeU32, rounding or size * 0.09)
     end
     local function circle(px, py, radius, filled)
         if filled then
-            drawList:AddCircleFilled(imgui.ImVec2(px, py), radius, strokeU32, 20)
+            drawList:AddCircleFilled(imgui.ImVec2(px, py), radius, strokeU32, 32)
         else
-            drawList:AddCircle(imgui.ImVec2(px, py), radius, strokeU32, 20, thickness)
+            drawList:AddCircle(imgui.ImVec2(px, py), radius, strokeU32, 32, thickness)
         end
     end
-
     if kind == 'brand' then
-        rect(left - size * 0.03, top - size * 0.03,
-            right + size * 0.03, bottom + size * 0.03, size * 0.13)
-        -- Compact vector GH monogram; it stays sharp at every UI scale.
-        line(cx - size * 0.05, top + size * 0.10,
-            left + size * 0.08, top + size * 0.10)
-        line(left + size * 0.08, top + size * 0.10,
-            left + size * 0.08, bottom - size * 0.10)
-        line(left + size * 0.08, bottom - size * 0.10,
-            cx - size * 0.05, bottom - size * 0.10)
-        line(cx - size * 0.05, bottom - size * 0.10,
-            cx - size * 0.05, cy + size * 0.02)
-        line(cx - size * 0.05, cy + size * 0.02,
-            cx - size * 0.15, cy + size * 0.02)
-        line(cx + size * 0.08, top + size * 0.10,
-            cx + size * 0.08, bottom - size * 0.10)
-        line(right - size * 0.07, top + size * 0.10,
-            right - size * 0.07, bottom - size * 0.10)
-        line(cx + size * 0.08, cy,
-            right - size * 0.07, cy)
+        -- Abstract module mark: a central core linked to three helper nodes.
+        -- It contains no letters and no rectangular frame.
+        drawList:AddCircleFilled(imgui.ImVec2(cx, cy), size * 0.45,
+            imgui.GetColorU32(theme.control), 40)
+        for index = 0, 2 do
+            local angle = -math.pi / 2 + index * math.pi * 2 / 3
+            local nodeX = cx + math.cos(angle) * size * 0.27
+            local nodeY = cy + math.sin(angle) * size * 0.27
+            line(cx, cy, nodeX, nodeY, math.max(1.4, size * 0.055))
+            drawList:AddCircleFilled(imgui.ImVec2(nodeX, nodeY), size * 0.075,
+                strokeU32, 24)
+        end
+        drawList:AddCircleFilled(imgui.ImVec2(cx, cy), size * 0.12,
+            strokeU32, 28)
+        drawList:AddCircle(imgui.ImVec2(cx, cy), size * 0.20,
+            strokeU32, 32, math.max(1.2, size * 0.045))
     elseif kind == 'home' then
         line(left, cy - size * 0.02, cx, top)
         line(cx, top, right, cy - size * 0.02)
@@ -1810,9 +2074,13 @@ local function drawIosIcon(kind, x, y, size, selected)
     elseif kind == 'server' then
         for index = 0, 2 do
             local yy = top + index * size * 0.23
-            rect(left, yy, right, yy + size * 0.16, size * 0.045)
-            drawList:AddCircleFilled(imgui.ImVec2(left + size * 0.10, yy + size * 0.08),
-                math.max(1.0, size * 0.035), strokeU32, 10)
+            filledRect(left, yy, right, yy + size * 0.17, size * 0.055,
+                imgui.GetColorU32(theme.control))
+            rect(left, yy, right, yy + size * 0.17, size * 0.055)
+            drawList:AddCircleFilled(imgui.ImVec2(left + size * 0.11, yy + size * 0.085),
+                math.max(1.1, size * 0.038), strokeU32, 16)
+            line(left + size * 0.23, yy + size * 0.085,
+                right - size * 0.08, yy + size * 0.085, math.max(1.0, thickness * 0.65))
         end
     elseif kind == 'weapon' then
         local barrelY = top + size * 0.12
@@ -1827,30 +2095,33 @@ local function drawIosIcon(kind, x, y, size, selected)
         line(cx - size * 0.03, bottom, cx + size * 0.01, cy)
         circle(cx + size * 0.16, cy - size * 0.005, size * 0.085, false)
     elseif kind == 'sensitivity' then
-        drawList:AddCircle(imgui.ImVec2(cx, cy), size * 0.23, strokeU32, 22, thickness)
-        drawList:AddCircleFilled(imgui.ImVec2(cx, cy), size * 0.055, strokeU32, 12)
-        line(cx, top, cx, cy - size * 0.28)
-        line(cx, cy + size * 0.28, cx, bottom)
-        line(left, cy, cx - size * 0.28, cy)
-        line(cx + size * 0.28, cy, right, cy)
+        drawList:AddCircle(imgui.ImVec2(cx, cy), size * 0.28, strokeU32, 32, thickness)
+        drawList:AddCircle(imgui.ImVec2(cx, cy), size * 0.13, strokeU32, 28,
+            math.max(1.1, thickness * 0.78))
+        drawList:AddCircleFilled(imgui.ImVec2(cx, cy), size * 0.045, strokeU32, 18)
+        line(cx, top, cx, cy - size * 0.34)
+        line(cx, cy + size * 0.34, cx, bottom)
+        line(left, cy, cx - size * 0.34, cy)
+        line(cx + size * 0.34, cy, right, cy)
     elseif kind == 'overlay' then
-        rect(left, top + size * 0.06, right, bottom - size * 0.06, size * 0.10)
-        for row = 0, 1 do
+        rect(left, top + size * 0.03, right, bottom - size * 0.03, size * 0.09)
+        for row = 0, 2 do
             for column = 0, 3 do
-                local keyX = left + size * (0.12 + column * 0.15)
-                local keyY = top + size * (0.22 + row * 0.18)
-                drawList:AddCircleFilled(imgui.ImVec2(keyX, keyY),
-                    math.max(1.0, size * 0.026), strokeU32, 8)
+                local keyX = left + size * (0.09 + column * 0.17)
+                local keyY = top + size * (0.13 + row * 0.17)
+                filledRect(keyX, keyY, keyX + size * 0.11,
+                    keyY + size * 0.09, size * 0.025)
             end
         end
-        line(left + size * 0.18, bottom - size * 0.20,
-            right - size * 0.18, bottom - size * 0.20, thickness)
+        filledRect(left + size * 0.20, bottom - size * 0.18,
+            right - size * 0.20, bottom - size * 0.09, size * 0.03)
     elseif kind == 'shortcut' then
-        line(left + size * 0.02, cy - size * 0.22, cx - size * 0.08, cy)
-        line(cx - size * 0.08, cy, left + size * 0.02, cy + size * 0.22)
-        line(right - size * 0.02, cy - size * 0.22, cx + size * 0.08, cy)
-        line(cx + size * 0.08, cy, right - size * 0.02, cy + size * 0.22)
-        line(cx - size * 0.02, top, cx + size * 0.02, bottom)
+        circle(left + size * 0.16, cy, size * 0.12, false)
+        circle(right - size * 0.16, cy, size * 0.12, false)
+        line(left + size * 0.28, cy, cx - size * 0.08, cy)
+        line(cx + size * 0.08, cy, right - size * 0.28, cy)
+        line(cx - size * 0.09, cy + size * 0.15,
+            cx + size * 0.09, cy - size * 0.15)
     elseif kind == 'functions' then
         local square = size * 0.22
         local gap = size * 0.10
@@ -1859,7 +2130,11 @@ local function drawIosIcon(kind, x, y, size, selected)
             for column = 0, 1 do
                 local ax = startX + column * (square + gap)
                 local ay = startY + row * (square + gap)
-                rect(ax, ay, ax + square, ay + square, size * 0.055)
+                if row == 0 and column == 0 then
+                    filledRect(ax, ay, ax + square, ay + square, size * 0.06)
+                else
+                    rect(ax, ay, ax + square, ay + square, size * 0.06)
+                end
             end
         end
     elseif kind == 'settings' then
@@ -1874,21 +2149,71 @@ local function drawIosIcon(kind, x, y, size, selected)
                 strokeU32, 16, thickness)
         end
     elseif kind == 'developer' then
-        circle(cx, top + size * 0.16, size * 0.13, false)
-        line(cx - size * 0.24, bottom, cx - size * 0.20, cy + size * 0.17)
-        line(cx - size * 0.20, cy + size * 0.17, cx, cy + size * 0.09)
-        line(cx, cy + size * 0.09, cx + size * 0.20, cy + size * 0.17)
-        line(cx + size * 0.20, cy + size * 0.17, cx + size * 0.24, bottom)
-        line(left - size * 0.05, cy - size * 0.01, left + size * 0.06, cy + size * 0.09)
-        line(left + size * 0.06, cy + size * 0.09, left - size * 0.05, cy + size * 0.19)
-        line(right + size * 0.05, cy - size * 0.01, right - size * 0.06, cy + size * 0.09)
-        line(right - size * 0.06, cy + size * 0.09, right + size * 0.05, cy + size * 0.19)
-    elseif kind == 'discord' then
-        rect(left, top + size * 0.07, right, bottom - size * 0.10, size * 0.18)
-        drawList:AddCircleFilled(imgui.ImVec2(cx - size * 0.14, cy), size * 0.052, strokeU32, 10)
-        drawList:AddCircleFilled(imgui.ImVec2(cx + size * 0.14, cy), size * 0.052, strokeU32, 10)
-        line(cx - size * 0.26, bottom - size * 0.14, left + size * 0.05, bottom)
-        line(cx + size * 0.26, bottom - size * 0.14, right - size * 0.05, bottom)
+        -- Crisp terminal/developer glyph. Every stroke stays inside the icon
+        -- bounds so small sizes do not lose edge pixels.
+        rect(left, top + size * 0.04, right, bottom - size * 0.12, size * 0.09)
+        line(left, top + size * 0.20, right, top + size * 0.20,
+            math.max(1.0, thickness * 0.72))
+        circle(left + size * 0.09, top + size * 0.12, size * 0.025, true)
+        line(cx - size * 0.20, cy - size * 0.07,
+            cx - size * 0.08, cy + size * 0.03)
+        line(cx - size * 0.08, cy + size * 0.03,
+            cx - size * 0.20, cy + size * 0.13)
+        line(cx + size * 0.20, cy - size * 0.07,
+            cx + size * 0.08, cy + size * 0.03)
+        line(cx + size * 0.08, cy + size * 0.03,
+            cx + size * 0.20, cy + size * 0.13)
+        line(cx + size * 0.04, cy - size * 0.12,
+            cx - size * 0.04, cy + size * 0.17,
+            math.max(1.0, thickness * 0.78))
+        line(cx - size * 0.20, bottom, cx + size * 0.20, bottom,
+            math.max(1.1, thickness * 0.85))
+    elseif kind == 'development' then
+        -- Monochrome development mark matching the 4K master artwork. It is
+        -- rendered at the target size from antialiased legacy-safe strokes,
+        -- so no bitmap is loaded and no texture can destabilize MoonImGui.
+        local function roundedStroke(ax, ay, bx, by, strokeWidth)
+            drawList:AddLine(imgui.ImVec2(ax, ay), imgui.ImVec2(bx, by),
+                strokeU32, strokeWidth)
+            local radius = strokeWidth * 0.5
+            drawList:AddCircleFilled(imgui.ImVec2(ax, ay), radius, strokeU32, 20)
+            drawList:AddCircleFilled(imgui.ImVec2(bx, by), radius, strokeU32, 20)
+        end
+        local outerWidth = math.max(2.2, size * 0.105)
+        local innerWidth = math.max(1.5, size * 0.064)
+        roundedStroke(x + size * 0.36, y + size * 0.15,
+            x + size * 0.14, cy, outerWidth)
+        roundedStroke(x + size * 0.14, cy,
+            x + size * 0.36, y + size * 0.85, outerWidth)
+        roundedStroke(x + size * 0.64, y + size * 0.15,
+            x + size * 0.86, cy, outerWidth)
+        roundedStroke(x + size * 0.86, cy,
+            x + size * 0.64, y + size * 0.85, outerWidth)
+
+        -- Modular diamond/core.
+        roundedStroke(cx, y + size * 0.23,
+            x + size * 0.63, y + size * 0.36, innerWidth)
+        roundedStroke(x + size * 0.63, y + size * 0.36,
+            cx, y + size * 0.49, innerWidth)
+        roundedStroke(cx, y + size * 0.49,
+            x + size * 0.37, y + size * 0.36, innerWidth)
+        roundedStroke(x + size * 0.37, y + size * 0.36,
+            cx, y + size * 0.23, innerWidth)
+        drawList:AddCircleFilled(imgui.ImVec2(cx, y + size * 0.36),
+            math.max(1.5, size * 0.045), strokeU32, 20)
+
+        -- Two helper layers and a precision node.
+        roundedStroke(x + size * 0.38, y + size * 0.51,
+            cx, y + size * 0.63, innerWidth)
+        roundedStroke(cx, y + size * 0.63,
+            x + size * 0.62, y + size * 0.51, innerWidth)
+        roundedStroke(x + size * 0.38, y + size * 0.65,
+            cx, y + size * 0.77, innerWidth)
+        roundedStroke(cx, y + size * 0.77,
+            x + size * 0.62, y + size * 0.65, innerWidth)
+        drawList:AddCircle(imgui.ImVec2(cx, y + size * 0.88),
+            math.max(1.8, size * 0.052), strokeU32, 20,
+            math.max(1.15, size * 0.034))
     elseif kind == 'search' then
         drawList:AddCircle(imgui.ImVec2(cx - size * 0.06, cy - size * 0.06),
             size * 0.22, strokeU32, 18, thickness)
@@ -1909,6 +2234,246 @@ local function drawIosIcon(kind, x, y, size, selected)
         line(cx, top + size * 0.07, cx, bottom - size * 0.16)
         line(cx, bottom - size * 0.16, cx - size * 0.12, bottom - size * 0.28)
         line(cx, bottom - size * 0.16, cx + size * 0.12, bottom - size * 0.28)
+    end
+end
+
+-- Unified 24 px icon system. Every active menu icon uses the same optical
+-- grid, stroke weight, rounded endpoints and monochrome theme color. The
+-- legacy implementation remains above only as a temporary compatibility
+-- reference while v2.1.3 is tested in-game.
+local function drawIosIcon(kind, x, y, size, selected)
+    local drawList = imgui.GetWindowDrawList()
+    local theme = themes[config.settings.theme]
+    local strokeU32 = imgui.GetColorU32(selected and theme.text or theme.muted)
+    local cx, cy = x + size * 0.5, y + size * 0.5
+    local left, right = x + size * 0.14, x + size * 0.86
+    local top, bottom = y + size * 0.14, y + size * 0.86
+    local stroke = math.max(1.35, size * 0.076)
+    local fineStroke = math.max(1.0, size * 0.055)
+
+    local function halfPixel(value)
+        return math.floor(value * 2 + 0.5) * 0.5
+    end
+
+    local function line(ax, ay, bx, by, customWidth)
+        local lineWidth = customWidth or stroke
+        ax, ay = halfPixel(ax), halfPixel(ay)
+        bx, by = halfPixel(bx), halfPixel(by)
+        drawList:AddLine(imgui.ImVec2(ax, ay), imgui.ImVec2(bx, by),
+            strokeU32, lineWidth)
+        -- Exact half-stroke caps hide the clipped end pixels produced by old
+        -- Dear ImGui builds, without creating a surrounding badge.
+        local capRadius = lineWidth * 0.47
+        drawList:AddCircleFilled(imgui.ImVec2(ax, ay), capRadius,
+            strokeU32, 12)
+        drawList:AddCircleFilled(imgui.ImVec2(bx, by), capRadius,
+            strokeU32, 12)
+    end
+
+    local function outlineRect(ax, ay, bx, by, rounding, customWidth)
+        ax, ay = halfPixel(ax), halfPixel(ay)
+        bx, by = halfPixel(bx), halfPixel(by)
+        drawList:AddRect(imgui.ImVec2(ax, ay), imgui.ImVec2(bx, by),
+            strokeU32, rounding or size * 0.08, 0, customWidth or stroke)
+    end
+
+    local function filledRect(ax, ay, bx, by, rounding)
+        ax, ay = halfPixel(ax), halfPixel(ay)
+        bx, by = halfPixel(bx), halfPixel(by)
+        drawList:AddRectFilled(imgui.ImVec2(ax, ay), imgui.ImVec2(bx, by),
+            strokeU32, rounding or size * 0.06)
+    end
+
+    local function outlineCircle(px, py, radius, customWidth)
+        px, py = halfPixel(px), halfPixel(py)
+        drawList:AddCircle(imgui.ImVec2(px, py), radius, strokeU32, 28,
+            customWidth or stroke)
+    end
+
+    local function filledCircle(px, py, radius)
+        px, py = halfPixel(px), halfPixel(py)
+        drawList:AddCircleFilled(imgui.ImVec2(px, py), radius, strokeU32, 24)
+    end
+
+    if kind == 'brand' then
+        -- Standalone isometric module/cube: complete, straight and frameless.
+        local moduleStroke = math.max(1.65, size * 0.064)
+        local peakY = y + size * 0.18
+        local shoulderY = y + size * 0.34
+        local seamY = y + size * 0.50
+        local sideBottomY = y + size * 0.66
+        local lowerY = y + size * 0.82
+        line(cx, peakY, x + size * 0.22, shoulderY, moduleStroke)
+        line(x + size * 0.22, shoulderY, cx, seamY, moduleStroke)
+        line(cx, seamY, x + size * 0.78, shoulderY, moduleStroke)
+        line(x + size * 0.78, shoulderY, cx, peakY, moduleStroke)
+        line(x + size * 0.22, shoulderY,
+            x + size * 0.22, sideBottomY, moduleStroke)
+        line(x + size * 0.22, sideBottomY, cx, lowerY, moduleStroke)
+        line(cx, lowerY, x + size * 0.78, sideBottomY, moduleStroke)
+        line(x + size * 0.78, sideBottomY,
+            x + size * 0.78, shoulderY, moduleStroke)
+        line(cx, seamY, cx, lowerY, moduleStroke)
+    elseif kind == 'home' then
+        -- Straight architectural house, matching house.fill proportions.
+        line(left, y + size * 0.48, cx, top, stroke)
+        line(cx, top, right, y + size * 0.48, stroke)
+        line(x + size * 0.22, y + size * 0.44,
+            x + size * 0.22, bottom, stroke)
+        line(x + size * 0.78, y + size * 0.44,
+            x + size * 0.78, bottom, stroke)
+        line(x + size * 0.22, bottom, x + size * 0.78, bottom, stroke)
+        outlineRect(x + size * 0.43, y + size * 0.62,
+            x + size * 0.57, bottom, 0, fineStroke)
+    elseif kind == 'server' then
+        -- Three server trays with one status LED and a data rail each.
+        for index = 0, 2 do
+            local rowTop = top + index * size * 0.25
+            local rowBottom = rowTop + size * 0.17
+            outlineRect(left, rowTop, right, rowBottom, size * 0.045, fineStroke)
+            filledCircle(x + size * 0.23, (rowTop + rowBottom) * 0.5,
+                math.max(1.0, size * 0.035))
+            line(x + size * 0.34, (rowTop + rowBottom) * 0.5,
+                x + size * 0.75, (rowTop + rowBottom) * 0.5,
+                math.max(1.0, size * 0.035))
+        end
+    elseif kind == 'weapon' then
+        -- Recognizable side-view pistol: slide, muzzle, trigger and grip.
+        outlineRect(left, y + size * 0.25, right,
+            y + size * 0.43, size * 0.025, fineStroke)
+        line(x + size * 0.28, y + size * 0.25,
+            x + size * 0.28, y + size * 0.43, fineStroke)
+        line(x + size * 0.58, y + size * 0.43,
+            x + size * 0.67, y + size * 0.55, stroke)
+        line(x + size * 0.67, y + size * 0.55,
+            x + size * 0.60, bottom, stroke)
+        line(x + size * 0.60, bottom,
+            x + size * 0.43, bottom, stroke)
+        line(x + size * 0.43, bottom,
+            x + size * 0.50, y + size * 0.51, stroke)
+        outlineCircle(x + size * 0.47, y + size * 0.51,
+            size * 0.075, fineStroke)
+    elseif kind == 'sensitivity' then
+        -- Precision crosshair with two optically balanced rings.
+        outlineCircle(cx, cy, size * 0.27, stroke)
+        outlineCircle(cx, cy, size * 0.105, fineStroke)
+        filledCircle(cx, cy, math.max(1.0, size * 0.032))
+        line(cx, top, cx, y + size * 0.24, fineStroke)
+        line(cx, y + size * 0.76, cx, bottom, fineStroke)
+        line(left, cy, x + size * 0.24, cy, fineStroke)
+        line(x + size * 0.76, cy, right, cy, fineStroke)
+    elseif kind == 'functions' then
+        -- Four consistent rounded modules, like square.grid.2x2.
+        local cell = size * 0.235
+        local gap = size * 0.11
+        local startX, startY = cx - cell - gap * 0.5, cy - cell - gap * 0.5
+        for row = 0, 1 do
+            for column = 0, 1 do
+                local cellX = startX + column * (cell + gap)
+                local cellY = startY + row * (cell + gap)
+                outlineRect(cellX, cellY, cellX + cell, cellY + cell,
+                    size * 0.045, fineStroke)
+            end
+        end
+    elseif kind == 'overlay' then
+        -- Keyboard shell and six distinct keycaps, without micro-noise.
+        outlineRect(left, y + size * 0.25, right, y + size * 0.76,
+            size * 0.085, fineStroke)
+        local keySize = size * 0.105
+        for row = 0, 1 do
+            for column = 0, 2 do
+                local keyX = x + size * (0.27 + column * 0.17)
+                local keyY = y + size * (0.35 + row * 0.16)
+                filledRect(keyX, keyY, keyX + keySize,
+                    keyY + keySize, size * 0.025)
+            end
+        end
+        filledRect(x + size * 0.35, y + size * 0.65,
+            x + size * 0.65, y + size * 0.70, size * 0.02)
+    elseif kind == 'mouse' then
+        -- Compact Magic Mouse silhouette with a distinct scroll surface.
+        outlineRect(x + size * 0.29, top, x + size * 0.71, bottom,
+            size * 0.19, stroke)
+        line(cx, top + size * 0.02, cx, y + size * 0.39, fineStroke)
+        outlineRect(x + size * 0.46, y + size * 0.27,
+            x + size * 0.54, y + size * 0.43, size * 0.04, fineStroke)
+    elseif kind == 'shortcut' then
+        -- Two linked rings communicate bind/shortcut without text.
+        outlineCircle(x + size * 0.36, y + size * 0.42,
+            size * 0.18, stroke)
+        outlineCircle(x + size * 0.64, y + size * 0.58,
+            size * 0.18, stroke)
+        line(x + size * 0.43, y + size * 0.46,
+            x + size * 0.57, y + size * 0.54, fineStroke)
+    elseif kind == 'settings' then
+        -- Three independent sliders with solid, high-contrast knobs.
+        local knobPositions = { 0.65, 0.36, 0.57 }
+        for index = 1, 3 do
+            local rowY = y + size * (0.27 + (index - 1) * 0.23)
+            line(left, rowY, right, rowY, fineStroke)
+            filledCircle(x + size * knobPositions[index], rowY, size * 0.075)
+        end
+    elseif kind == 'developer' then
+        -- Standalone person/contact symbol; no code mark and no container.
+        outlineCircle(cx, y + size * 0.31, size * 0.13, stroke)
+        line(cx, y + size * 0.49,
+            x + size * 0.31, y + size * 0.58, stroke)
+        line(cx, y + size * 0.49,
+            x + size * 0.69, y + size * 0.58, stroke)
+        line(x + size * 0.31, y + size * 0.58,
+            x + size * 0.23, y + size * 0.79, stroke)
+        line(x + size * 0.69, y + size * 0.58,
+            x + size * 0.77, y + size * 0.79, stroke)
+        line(x + size * 0.23, y + size * 0.79,
+            x + size * 0.77, y + size * 0.79, stroke)
+    elseif kind == 'development' then
+        -- This is the supplied mark itself, supersampled as safe rounded runs.
+        -- Missing runs naturally form the eyes and smile on either theme.
+        local unit = size / 48.0
+        local rowHeight = math.max(1.05, unit * 1.15)
+        local capRadius = rowHeight * 0.5
+        for _, row in ipairs(DISCORD_REFERENCE_ROWS) do
+            local centerY = y + (row[1] + 0.5) * unit
+            for runIndex = 2, #row do
+                local run = row[runIndex]
+                local startX = x + run[1] * unit
+                local endX = x + (run[2] + 1) * unit
+                drawList:AddRectFilled(
+                    imgui.ImVec2(startX + capRadius, centerY - capRadius),
+                    imgui.ImVec2(endX - capRadius, centerY + capRadius),
+                    strokeU32, 0)
+                drawList:AddCircleFilled(imgui.ImVec2(startX + capRadius, centerY),
+                    capRadius, strokeU32, 8)
+                drawList:AddCircleFilled(imgui.ImVec2(endX - capRadius, centerY),
+                    capRadius, strokeU32, 8)
+            end
+        end
+    elseif kind == 'search' then
+        outlineCircle(x + size * 0.43, y + size * 0.43,
+            size * 0.24, stroke)
+        line(x + size * 0.60, y + size * 0.60,
+            right, bottom, stroke)
+    elseif kind == 'notification' then
+        -- Bell with a clean dome, baseline and separate clapper.
+        line(cx, top, x + size * 0.34, y + size * 0.29, stroke)
+        line(x + size * 0.34, y + size * 0.29,
+            x + size * 0.25, y + size * 0.68, stroke)
+        line(cx, top, x + size * 0.66, y + size * 0.29, stroke)
+        line(x + size * 0.66, y + size * 0.29,
+            x + size * 0.75, y + size * 0.68, stroke)
+        line(x + size * 0.25, y + size * 0.68,
+            x + size * 0.75, y + size * 0.68, stroke)
+        filledCircle(cx, y + size * 0.80, size * 0.055)
+    elseif kind == 'update' then
+        -- SF-style arrow.down.to.line, complete without a circular frame.
+        local updateStroke = math.max(1.75, size * 0.072)
+        line(cx, y + size * 0.18, cx, y + size * 0.60, updateStroke)
+        line(cx, y + size * 0.60,
+            x + size * 0.35, y + size * 0.46, updateStroke)
+        line(cx, y + size * 0.60,
+            x + size * 0.65, y + size * 0.46, updateStroke)
+        line(x + size * 0.27, y + size * 0.78,
+            x + size * 0.73, y + size * 0.78, updateStroke)
     end
 end
 
@@ -2061,11 +2626,11 @@ local function compactToggleButton(id, animation, leftLabel, rightLabel, isTheme
     end
 
     if isTheme then
-        drawSunMoonGlyph(drawList, 'moon', position.x + 13, position.y + 13,
-            animation < 0.5 and theme.text or theme.muted,
-            animation < 0.5 and indicatorColor or theme.control)
-        drawSunMoonGlyph(drawList, 'sun', position.x + 39, position.y + 13,
-            animation >= 0.5 and theme.text or theme.muted, indicatorColor)
+        drawSunMoonGlyph(drawList, 'sun', position.x + 13, position.y + 13,
+            animation < 0.5 and theme.text or theme.muted, indicatorColor)
+        drawSunMoonGlyph(drawList, 'moon', position.x + 39, position.y + 13,
+            animation >= 0.5 and theme.text or theme.muted,
+            animation >= 0.5 and indicatorColor or theme.control)
     else
         local languageFontPushed = pushFont(uiFonts.semibold)
         local leftSize = imgui.CalcTextSize(leftLabel)
@@ -2108,10 +2673,10 @@ local function navButton(label, page)
         drawList:AddRectFilled(imgui.ImVec2(itemPos.x + 2, itemPos.y + 8),
             imgui.ImVec2(itemPos.x + 4, itemPos.y + 23), imgui.GetColorU32(theme.text), 1.0)
     end
-    drawIosIcon(pageIconKinds[page], itemPos.x + 11, itemPos.y + 6, 19, selected)
+    drawIosIcon(pageIconKinds[page], itemPos.x + 10, itemPos.y + 5, 21, selected)
     local navFontPushed = selected and pushFont(uiFonts.semibold) or false
     local textSize = imgui.CalcTextSize(label)
-    drawList:AddText(imgui.ImVec2(itemPos.x + 42,
+    drawList:AddText(imgui.ImVec2(itemPos.x + 44,
         itemPos.y + math.floor((31 - textSize.y) / 2)),
         imgui.GetColorU32(selected and theme.text or theme.muted), label)
     popFont(navFontPushed)
@@ -2176,7 +2741,7 @@ local function commandBindRow(id, title, command, field)
     local theme = themes[config.settings.theme]
     local width = imgui.GetContentRegionAvail().x
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##command_' .. id, imgui.ImVec2(width, 76), true)
+    imgui.BeginChild('##command_' .. id, imgui.ImVec2(width, 76), true, NON_SCROLLING_CHILD_FLAGS)
     local commandPos = imgui.GetWindowPos()
     drawIosIcon('server', commandPos.x + 14, commandPos.y + 22, 28, true)
     imgui.SetCursorPos(imgui.ImVec2(54, 13))
@@ -2192,7 +2757,7 @@ end
 local function dashboardCard(id, label, value, width, iconKind)
     local theme = themes[config.settings.theme]
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##dash_' .. id, imgui.ImVec2(width, 92), true)
+    imgui.BeginChild('##dash_' .. id, imgui.ImVec2(width, 92), true, NON_SCROLLING_CHILD_FLAGS)
     local cardPos = imgui.GetWindowPos()
     drawIosIcon(iconKind, cardPos.x + 14, cardPos.y + 18, 28, true)
     imgui.SetCursorPos(imgui.ImVec2(52, 14))
@@ -2206,7 +2771,7 @@ end
 local function systemMonitorCard(id, label, value, width, iconKind)
     local theme = themes[config.settings.theme]
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##monitor_' .. id, imgui.ImVec2(width, 68), true)
+    imgui.BeginChild('##monitor_' .. id, imgui.ImVec2(width, 68), true, NON_SCROLLING_CHILD_FLAGS)
     local cardPos = imgui.GetWindowPos()
     drawIosIcon(iconKind, cardPos.x + 13, cardPos.y + 19, 30, false)
     imgui.SetCursorPos(imgui.ImVec2(56, 10))
@@ -2230,53 +2795,47 @@ local function drawHome()
     local theme = themes[config.settings.theme]
     local width = imgui.GetContentRegionAvail().x
     sectionTitle(tr('home_about_title'))
-    imgui.Dummy(imgui.ImVec2(0, 5))
+    imgui.Dummy(imgui.ImVec2(0, 2))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##homeAboutMod', imgui.ImVec2(width, 136), false)
+    imgui.BeginChild('##homeAboutMod', imgui.ImVec2(width, 82), false, NON_SCROLLING_CHILD_FLAGS)
     local aboutCardPos = imgui.GetWindowPos()
-    drawIosIcon('brand', aboutCardPos.x + 18, aboutCardPos.y + 19, 42, true)
-    imgui.SetCursorPos(imgui.ImVec2(78, 15))
-    richWrappedText(tr('home_about_text'), width - 94)
+    drawIosIcon('brand', aboutCardPos.x + 15, aboutCardPos.y + 20, 36, true)
+    imgui.SetCursorPos(imgui.ImVec2(65, 8))
+    richWrappedText(tr('home_about_text'), width - 78)
     imgui.EndChild()
     imgui.PopStyleColor()
 
-    imgui.Dummy(imgui.ImVec2(0, 19))
+    imgui.Dummy(imgui.ImVec2(0, 6))
     sectionTitle(tr('home_update_title'))
-    imgui.Dummy(imgui.ImVec2(0, 5))
+    imgui.Dummy(imgui.ImVec2(0, 2))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##homeUpdateInformation', imgui.ImVec2(width, 150), false)
+    imgui.BeginChild('##homeUpdateInformation', imgui.ImVec2(width, 108), false, NON_SCROLLING_CHILD_FLAGS)
     local updateCardPos = imgui.GetWindowPos()
-    drawIosIcon('update', updateCardPos.x + 17, updateCardPos.y + 15, 34, true)
-    imgui.SetCursorPos(imgui.ImVec2(66, 14))
-    local updateFontPushed = pushFont(uiFonts.semibold)
-    imgui.TextColored(theme.text, tr('notifications_update'))
-    popFont(updateFontPushed)
-    imgui.SetCursorPos(imgui.ImVec2(17, 50))
-    mutedWrapped(tr('home_update_info'), width - 34)
-    imgui.SetCursorPos(imgui.ImVec2(17, imgui.GetCursorPosY() + 7))
+    drawIosIcon('update', updateCardPos.x + 16, updateCardPos.y + 32, 36, true)
+    imgui.SetCursorPos(imgui.ImVec2(66, 9))
+    richWrappedText(tr('home_update_info'), width - 80)
+    imgui.SetCursorPos(imgui.ImVec2(66, imgui.GetCursorPosY() + 1))
     imgui.PushStyleColor(imgui.Col.Text, theme.blue)
-    imgui.PushTextWrapPos(width - 17)
+    imgui.PushTextWrapPos(width - 14)
     imgui.Text(tr('home_update_future'))
     imgui.PopTextWrapPos()
     imgui.PopStyleColor()
     imgui.EndChild()
     imgui.PopStyleColor()
 
-    imgui.Dummy(imgui.ImVec2(0, 19))
+    imgui.Dummy(imgui.ImVec2(0, 6))
     sectionTitle(tr('home_feedback_title'))
-    imgui.Dummy(imgui.ImVec2(0, 5))
+    imgui.Dummy(imgui.ImVec2(0, 2))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##homeDeveloperContact', imgui.ImVec2(width, 128), false)
+    imgui.BeginChild('##homeDeveloperContact', imgui.ImVec2(width, 88), false, NON_SCROLLING_CHILD_FLAGS)
     local cardPos = imgui.GetWindowPos()
-    drawIosIcon('developer', cardPos.x + 18, cardPos.y + 14, 36, true)
-    imgui.SetCursorPos(imgui.ImVec2(70, 14))
-    mutedText(tr('home_discord_label'))
-    imgui.SetCursorPos(imgui.ImVec2(70, 35))
+    drawIosIcon('development', cardPos.x + 21, cardPos.y + 23, 26, true)
+    imgui.SetCursorPos(imgui.ImVec2(70, 12))
     local discordFontPushed = pushFont(uiFonts.title)
-    imgui.TextColored(theme.text, 'semaka47')
+    imgui.TextColored(theme.text, tr('discord_contact'))
     popFont(discordFontPushed)
-    imgui.SetCursorPos(imgui.ImVec2(18, 76))
-    mutedWrapped(tr('home_feedback_text'), width - 36)
+    imgui.SetCursorPos(imgui.ImVec2(70, 39))
+    mutedWrapped(tr('home_feedback_text'), width - 86)
     imgui.EndChild()
     imgui.PopStyleColor()
 end
@@ -2515,7 +3074,7 @@ local function drawEditableWeaponCommandRow(actionType, weapon)
 
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
     imgui.BeginChild('##commandEditor_' .. actionType .. '_' .. weapon.command,
-        imgui.ImVec2(width, 54), true)
+        imgui.ImVec2(width, 54), true, NON_SCROLLING_CHILD_FLAGS)
     imgui.SetCursorPos(imgui.ImVec2(13, 18))
     imgui.Text(tr(labelKey) .. ' ' .. weapon.name)
 
@@ -2561,7 +3120,7 @@ local function drawWeaponSlot(slot)
     local keyField = 'weapon_key_' .. slot
 
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##weaponSlot' .. slot, imgui.ImVec2(width, 50), true)
+    imgui.BeginChild('##weaponSlot' .. slot, imgui.ImVec2(width, 50), true, NON_SCROLLING_CHILD_FLAGS)
     imgui.SetCursorPos(imgui.ImVec2(14, 15))
     imgui.TextColored(theme.text, tr('slot'))
 
@@ -2690,7 +3249,7 @@ local function drawShortcutRow(slot)
     local aliasBuffer = getInlineCommandBuffer(aliasField)
 
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##shortcutRow' .. slot, imgui.ImVec2(width, 48), true)
+    imgui.BeginChild('##shortcutRow' .. slot, imgui.ImVec2(width, 48), true, NON_SCROLLING_CHILD_FLAGS)
     imgui.SetCursorPos(imgui.ImVec2(13, 16))
     imgui.TextColored(theme.muted, string.format('%02d', slot))
 
@@ -2823,12 +3382,13 @@ local function drawSensitivity()
 
     imgui.Dummy(imgui.ImVec2(0, 7))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##sensitivityStatus', imgui.ImVec2(imgui.GetContentRegionAvail().x, 70), true)
-    imgui.SetCursorPos(imgui.ImVec2(15, 11))
+    imgui.BeginChild('##sensitivityStatus', imgui.ImVec2(imgui.GetContentRegionAvail().x, 58), true,
+        NON_SCROLLING_CHILD_FLAGS)
+    imgui.SetCursorPos(imgui.ImVec2(15, 7))
     mutedText(tr('current_weapon'))
     imgui.SetCursorPosX(15)
     imgui.TextColored(theme.accent, currentWeaponName())
-    imgui.SetCursorPos(imgui.ImVec2(350, 11))
+    imgui.SetCursorPos(imgui.ImVec2(350, 7))
     mutedText(tr('current_value'))
     imgui.SetCursorPosX(350)
     local currentWeaponId = getCurrentCharWeapon(PLAYER_PED)
@@ -2850,12 +3410,12 @@ local function drawSensitivity()
         local overrideField = 'sens_override_' .. weapon.id
         imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
         imgui.BeginChild('##sensitivityWeapon' .. weapon.id,
-            imgui.ImVec2(imgui.GetContentRegionAvail().x, 54), true)
-        imgui.SetCursorPos(imgui.ImVec2(14, 19))
+            imgui.ImVec2(imgui.GetContentRegionAvail().x, 44), true, NON_SCROLLING_CHILD_FLAGS)
+        imgui.SetCursorPos(imgui.ImVec2(14, 14))
         local weaponFontPushed = pushFont(uiFonts.semibold)
         imgui.TextColored(theme.text, weapon.name)
         popFont(weaponFontPushed)
-        imgui.SetCursorPos(imgui.ImVec2(174, 7))
+        imgui.SetCursorPos(imgui.ImVec2(174, 2))
         local minimum = math.max(0.000050, gameDefault * 0.125)
         local maximum = math.min(0.020000, gameDefault * 1.60)
         local sensitivityChanged, sensitivityValue = slimSlider('', field,
@@ -2874,9 +3434,10 @@ local function drawSensitivity()
         end
         imgui.EndChild()
         imgui.PopStyleColor()
+        imgui.SetCursorPosY(imgui.GetCursorPosY() - 3)
     end
 
-    imgui.Dummy(imgui.ImVec2(0, 7))
+    imgui.Dummy(imgui.ImVec2(0, 4))
     if optionButton(tr('reset_sensitivity'), false, 250, 'resetSensitivity') then
         restoreSensitivity()
         local resetValue = clamp(baseSensitivityX or DEFAULT_SENSITIVITY, 0.000050, 0.020000)
@@ -2896,7 +3457,7 @@ local function drawFunctions()
 
     imgui.Dummy(imgui.ImVec2(0, 8))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##infiniteRunCard', imgui.ImVec2(width, 70), false)
+    imgui.BeginChild('##infiniteRunCard', imgui.ImVec2(width, 70), false, NON_SCROLLING_CHILD_FLAGS)
     imgui.SetCursorPos(imgui.ImVec2(15, 10))
     local infiniteRun = uiBool(config.settings.infinite_run)
     if imgui.Checkbox(tr('infinite_run') .. '##infinite_run', infiniteRun) then
@@ -2908,9 +3469,117 @@ local function drawFunctions()
     imgui.PopStyleColor()
 
     imgui.Dummy(imgui.ImVec2(0, 15))
+    sectionTitle(tr('reconnect_title'))
+    imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
+    imgui.BeginChild('##reconnectCard', imgui.ImVec2(width, 302), false,
+        NON_SCROLLING_CHILD_FLAGS)
+    imgui.SetCursorPos(imgui.ImVec2(15, 10))
+    local ultraFast = uiBool(config.settings.ultra_fast_connect)
+    if imgui.Checkbox(tr('ultra_fast_connect') .. '##ultraFastConnect', ultraFast) then
+        config.settings.ultra_fast_connect = uiGet(ultraFast) and sampEventsAvailable
+        if uiGet(ultraFast) and not sampEventsAvailable then
+            ghChat(tr('reconnect_unavailable'))
+        end
+        if not config.settings.ultra_fast_connect then
+            Runtime.reconnectPending = false
+            Runtime.reconnectStatus = 'idle'
+        end
+        saveSettings()
+    end
+    imgui.SetCursorPos(imgui.ImVec2(15, 38))
+    mutedWrapped(tr('ultra_fast_connect_hint'), width - 30)
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 91))
+    mutedText(tr('reconnect_host'))
+    imgui.SetCursorPos(imgui.ImVec2(15, 110))
+    local hostWidthPushed = uiItemWidth(342)
+    local hostChanged
+    if legacyImgui then
+        hostChanged = imgui.InputText('##reconnectHost', Runtime.uiBuffers.reconnectHost)
+    else
+        hostChanged = imgui.InputText('##reconnectHost', Runtime.uiBuffers.reconnectHost, 129)
+    end
+    uiEndItemWidth(hostWidthPushed)
+    if hostChanged then
+        config.settings.reconnect_host = getTextBuffer(Runtime.uiBuffers.reconnectHost):sub(1, 127)
+        saveSettings()
+    end
+
+    imgui.SetCursorPos(imgui.ImVec2(375, 91))
+    mutedText(tr('reconnect_port'))
+    imgui.SetCursorPos(imgui.ImVec2(375, 108))
+    local portChanged, portValue = preciseIntegerControl('reconnectPort',
+        config.settings.reconnect_port, 1, 65535, width - 390)
+    if portChanged then
+        config.settings.reconnect_port = portValue
+        saveSettings()
+    end
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 151))
+    mutedText(tr('reconnect_name'))
+    imgui.SetCursorPos(imgui.ImVec2(15, 170))
+    local nameWidthPushed = uiItemWidth(250)
+    local nameChanged
+    if legacyImgui then
+        nameChanged = imgui.InputText('##reconnectName', Runtime.uiBuffers.reconnectName)
+    else
+        nameChanged = imgui.InputText('##reconnectName', Runtime.uiBuffers.reconnectName, 25)
+    end
+    uiEndItemWidth(nameWidthPushed)
+    if nameChanged then
+        config.settings.reconnect_name = getTextBuffer(Runtime.uiBuffers.reconnectName):sub(1, 24)
+        saveSettings()
+    end
+
+    imgui.SetCursorPos(imgui.ImVec2(284, 151))
+    mutedText(tr('reconnect_clan_tag'))
+    imgui.SetCursorPos(imgui.ImVec2(284, 170))
+    local clanWidthPushed = uiItemWidth(width - 299)
+    local clanChanged
+    if legacyImgui then
+        clanChanged = imgui.InputText('##reconnectClan', Runtime.uiBuffers.reconnectClan)
+    else
+        clanChanged = imgui.InputText('##reconnectClan', Runtime.uiBuffers.reconnectClan, 17)
+    end
+    uiEndItemWidth(clanWidthPushed)
+    if clanChanged then
+        config.settings.reconnect_clan_tag = getTextBuffer(Runtime.uiBuffers.reconnectClan):sub(1, 16)
+        saveSettings()
+    end
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 211))
+    local removeClan = uiBool(config.settings.reconnect_remove_clan)
+    if imgui.Checkbox(tr('reconnect_remove_clan') .. '##reconnectRemoveClan', removeClan) then
+        config.settings.reconnect_remove_clan = uiGet(removeClan)
+        saveSettings()
+    end
+    imgui.SetCursorPos(imgui.ImVec2(315, 207))
+    local reconnectDelayChanged, reconnectDelayValue = slimSlider(tr('reconnect_delay'),
+        'reconnectDelay', config.settings.reconnect_delay, 0.50, 5.00,
+        '%.2f s', width - 330, false)
+    if reconnectDelayChanged then
+        config.settings.reconnect_delay = reconnectDelayValue
+        saveSettings()
+    end
+
+    imgui.SetCursorPos(imgui.ImVec2(15, 255))
+    if optionButton(tr('reconnect_now'), false, 182, 'reconnectNow') then
+        Runtime.startManualReconnect()
+    end
+    imgui.SameLine(0, 13)
+    local reconnectStatusKey = Runtime.reconnectStatus == 'waiting' and 'reconnect_waiting'
+        or (Runtime.reconnectStatus == 'connecting' and 'reconnect_connecting' or 'reconnect_idle')
+    imgui.TextColored(Runtime.reconnectStatus == 'idle' and theme.muted or theme.blue,
+        tr(reconnectStatusKey))
+    imgui.SetCursorPos(imgui.ImVec2(15, 284))
+    mutedText(tr('reconnect_current'))
+    imgui.EndChild()
+    imgui.PopStyleColor()
+
+    imgui.Dummy(imgui.ImVec2(0, 15))
     sectionTitle(tr('fps_functions'))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##fpsFunctionsCard', imgui.ImVec2(width, 340), false)
+    imgui.BeginChild('##fpsFunctionsCard', imgui.ImVec2(width, 340), false, NON_SCROLLING_CHILD_FLAGS)
     imgui.SetCursorPos(imgui.ImVec2(15, 10))
     local fpsBoost = uiBool(config.settings.fps_boost)
     if imgui.Checkbox(tr('fps_boost') .. '##fps_boost', fpsBoost) then
@@ -2968,7 +3637,7 @@ local function drawFunctions()
     imgui.Dummy(imgui.ImVec2(0, 15))
     sectionTitle(tr('world_overrides'))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##worldOverridesCard', imgui.ImVec2(width, 174), false)
+    imgui.BeginChild('##worldOverridesCard', imgui.ImVec2(width, 174), false, NON_SCROLLING_CHILD_FLAGS)
     imgui.SetCursorPos(imgui.ImVec2(15, 10))
     local timeOverride = uiBool(config.settings.time_override)
     if imgui.Checkbox(tr('time_override') .. '##time_override', timeOverride) then
@@ -3002,7 +3671,7 @@ local function drawFunctions()
     imgui.Dummy(imgui.ImVec2(0, 15))
     sectionTitle(tr('bullet_track_title'))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##bulletTrackCard', imgui.ImVec2(width, 174), false)
+    imgui.BeginChild('##bulletTrackCard', imgui.ImVec2(width, 174), false, NON_SCROLLING_CHILD_FLAGS)
     imgui.SetCursorPos(imgui.ImVec2(15, 10))
     local bulletTrack = uiBool(config.settings.bullet_track)
     if imgui.Checkbox(tr('bullet_track') .. '##bullet_track', bulletTrack) then
@@ -3033,7 +3702,7 @@ local function drawFunctions()
     end
     imgui.SetCursorPos(imgui.ImVec2(295, 100))
     local bulletDurationChanged, bulletDurationValue = slimSlider(tr('bullet_track_duration'),
-        'bulletDuration', config.settings.bullet_track_duration, 0.25, 2.0,
+        'bulletDuration', config.settings.bullet_track_duration, 0.25, 5.0,
         '%.2f s', width - 310, false)
     if bulletDurationChanged then
         config.settings.bullet_track_duration = bulletDurationValue
@@ -3045,15 +3714,15 @@ local function drawFunctions()
     imgui.Dummy(imgui.ImVec2(0, 15))
     sectionTitle(tr('change_skin_title'))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##changeSkinCard', imgui.ImVec2(width, 126), false)
+    imgui.BeginChild('##changeSkinCard', imgui.ImVec2(width, 126), false, NON_SCROLLING_CHILD_FLAGS)
     imgui.SetCursorPos(imgui.ImVec2(15, 10))
     local changeSkin = uiBool(config.settings.change_skin)
     if imgui.Checkbox(tr('change_skin') .. '##change_skin', changeSkin) then
         Runtime.setChangeSkinEnabled(uiGet(changeSkin))
     end
-    imgui.SetCursorPos(imgui.ImVec2(250, 17))
+    imgui.SetCursorPos(imgui.ImVec2(250, 16))
     imgui.Text(tr('change_skin_id'))
-    imgui.SetCursorPos(imgui.ImVec2(320, 8))
+    imgui.SetCursorPos(imgui.ImVec2(320, 10))
     local skinChanged, skinValue = preciseIntegerControl('changeSkinId',
         config.settings.change_skin_id, 0, 311, math.max(142, width - 335))
     if skinChanged then
@@ -3080,13 +3749,36 @@ local function persistColorPicker(prefix, picker)
     config.settings[prefix .. '_r'] = math.floor(uiGet(picker, 0) * 255 + 0.5)
     config.settings[prefix .. '_g'] = math.floor(uiGet(picker, 1) * 255 + 0.5)
     config.settings[prefix .. '_b'] = math.floor(uiGet(picker, 2) * 255 + 0.5)
+    local buffer = colorHexBuffer(prefix)
+    setTextBuffer(buffer, 8, Runtime.colorHex(prefix))
     saveSettings()
 end
 
-local function drawColorPickerSetting(label, prefix, picker, id)
+function Runtime.applyHexColor(prefix, picker, buffer)
+    local value = getTextBuffer(buffer):upper():gsub('%s+', ''):gsub('^#', '')
+    if not value:match('^[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]$') then
+        ghChat(tr('color_invalid'))
+        return false
+    end
+    local red = tonumber(value:sub(1, 2), 16)
+    local green = tonumber(value:sub(3, 4), 16)
+    local blue = tonumber(value:sub(5, 6), 16)
+    config.settings[prefix .. '_r'] = red
+    config.settings[prefix .. '_g'] = green
+    config.settings[prefix .. '_b'] = blue
+    uiSet(picker, red / 255, 0)
+    uiSet(picker, green / 255, 1)
+    uiSet(picker, blue / 255, 2)
+    uiSet(picker, 1.0, 3)
+    setTextBuffer(buffer, 8, '#' .. value)
+    saveSettings()
+    return true
+end
+
+local function drawColorPickerSetting(label, prefix, picker, id, compact)
     local theme = themes[config.settings.theme]
     local popupId = '##colorPickerPopup' .. id
-    local width, height = 44, 26
+    local width, height = 48, 28
     local position = imgui.GetCursorScreenPos()
 
     imgui.PushStyleColor(imgui.Col.Button, color(0, 0, 0, 0))
@@ -3099,26 +3791,34 @@ local function drawColorPickerSetting(label, prefix, picker, id)
     local drawList = imgui.GetWindowDrawList()
     local selectedColor = imgui.ImVec4(uiGet(picker, 0), uiGet(picker, 1), uiGet(picker, 2), 1.0)
     drawList:AddRectFilled(
-        imgui.ImVec2(position.x, position.y + 2),
+        imgui.ImVec2(position.x, position.y + 3),
+        imgui.ImVec2(position.x + width, position.y + height + 1),
+        imgui.GetColorU32(color(0, 0, 0, theme.mode == 'dark' and 0.32 or 0.16)), 12)
+    drawList:AddRectFilled(
+        imgui.ImVec2(position.x, position.y),
         imgui.ImVec2(position.x + width, position.y + height - 2),
-        imgui.GetColorU32(selectedColor), 11)
+        imgui.GetColorU32(selectedColor), 12)
     if hovered then
         drawList:AddCircleFilled(imgui.ImVec2(position.x + width - 5, position.y + 5),
             2.2, imgui.GetColorU32(theme.strong), 12)
     end
 
-    local helper = tr('select_color')
-    local helperSize = imgui.CalcTextSize(helper)
-    drawList:AddText(
-        imgui.ImVec2(position.x + width + 11, position.y + (height - helperSize.y) / 2),
-        imgui.GetColorU32(theme.muted), helper)
+    if not compact then
+        local helper = tr('select_color')
+        local helperSize = imgui.CalcTextSize(helper)
+        drawList:AddText(
+            imgui.ImVec2(position.x + width + 11, position.y + (height - helperSize.y) / 2),
+            imgui.GetColorU32(theme.muted), helper)
+    end
 
     if clicked then
+        local buffer = colorHexBuffer(prefix)
+        setTextBuffer(buffer, 8, Runtime.colorHex(prefix))
         imgui.OpenPopup(popupId)
     end
 
     if imgui.Cond and imgui.Cond.Appearing then
-        imgui.SetNextWindowSize(imgui.ImVec2(300, 340), imgui.Cond.Appearing)
+        imgui.SetNextWindowSize(imgui.ImVec2(370, 286), imgui.Cond.Appearing)
     end
     imgui.PushStyleVar(imgui.StyleVar.WindowPadding, imgui.ImVec2(14, 14))
     if imgui.BeginPopup(popupId) then
@@ -3126,20 +3826,63 @@ local function drawColorPickerSetting(label, prefix, picker, id)
         imgui.Text(label)
         popFont(titlePushed)
         mutedText(tr('select_color'))
-        imgui.Dummy(imgui.ImVec2(0, 5))
 
         local pickerFlags = 0
         if imgui.ColorEditFlags then
             pickerFlags = (imgui.ColorEditFlags.NoInputs or 0)
                 + (imgui.ColorEditFlags.NoAlpha or 0)
                 + (imgui.ColorEditFlags.NoLabel or 0)
+                + (imgui.ColorEditFlags.NoSidePreview or 0)
+                + (imgui.ColorEditFlags.NoSmallPreview or 0)
                 + (imgui.ColorEditFlags.PickerHueBar or 0)
         end
-        local pickerWidthPushed = uiItemWidth(270)
+        imgui.SetCursorPos(imgui.ImVec2(14, 58))
+        local pickerWidthPushed = uiItemWidth(202)
         if imgui.ColorPicker4('##visualColorPicker' .. id, picker, pickerFlags) then
             persistColorPicker(prefix, picker)
         end
         uiEndItemWidth(pickerWidthPushed)
+
+        local buffer = colorHexBuffer(prefix)
+        imgui.SetCursorPos(imgui.ImVec2(234, 62))
+        local popupDrawList = imgui.GetWindowDrawList()
+        local swatchPosition = imgui.GetCursorScreenPos()
+        popupDrawList:AddRectFilled(
+            imgui.ImVec2(swatchPosition.x, swatchPosition.y + 3),
+            imgui.ImVec2(swatchPosition.x + 118, swatchPosition.y + 49),
+            imgui.GetColorU32(color(0, 0, 0, theme.mode == 'dark' and 0.30 or 0.14)), 11)
+        popupDrawList:AddRectFilled(swatchPosition,
+            imgui.ImVec2(swatchPosition.x + 118, swatchPosition.y + 45),
+            imgui.GetColorU32(selectedColor), 11)
+
+        imgui.SetCursorPos(imgui.ImVec2(234, 113))
+        imgui.TextColored(theme.muted, tr('color_current'))
+        imgui.SetCursorPos(imgui.ImVec2(234, 135))
+        local hexWidthPushed = uiItemWidth(118)
+        if legacyImgui then
+            imgui.InputText('##hexColor' .. id, buffer)
+        else
+            imgui.InputText('##hexColor' .. id, buffer, 8)
+        end
+        uiEndItemWidth(hexWidthPushed)
+
+        imgui.SetCursorPos(imgui.ImVec2(234, 174))
+        if optionButton(tr('color_apply'), false, 118, 'applyHex' .. id) then
+            Runtime.applyHexColor(prefix, picker, buffer)
+        end
+        imgui.SetCursorPos(imgui.ImVec2(234, 212))
+        if optionButton(tr('color_copy'), false, 118, 'copyHex' .. id) then
+            local code = Runtime.colorHex(prefix)
+            local copied = false
+            if type(rawget(_G, 'setClipboardText')) == 'function' then
+                copied = pcall(setClipboardText, code)
+            elseif type(imgui.SetClipboardText) == 'function' then
+                copied = pcall(imgui.SetClipboardText, code)
+            end
+            if copied then
+                ghChat(tr('color_copied'))
+            end
+        end
         imgui.EndPopup()
     end
     imgui.PopStyleVar()
@@ -3150,27 +3893,27 @@ local function drawOverlaySettings()
     sectionTitle(tr('input_title'))
     mutedWrapped(tr('overlay_hint'))
 
-    imgui.Dummy(imgui.ImVec2(0, 10))
+    imgui.Dummy(imgui.ImVec2(0, 7))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
     imgui.BeginChild('##keyboardOverlayCard',
-        imgui.ImVec2(imgui.GetContentRegionAvail().x, 132), true, NON_SCROLLING_CHILD_FLAGS)
+        imgui.ImVec2(imgui.GetContentRegionAvail().x, 104), false, NON_SCROLLING_CHILD_FLAGS)
     local keyboardCardPos = imgui.GetWindowPos()
-    local keyboardCardWidth = imgui.GetWindowWidth()
-    local keyboardCardDrawList = imgui.GetWindowDrawList()
     drawIosIcon('overlay', keyboardCardPos.x + imgui.GetWindowWidth() - 44, keyboardCardPos.y + 12, 28, true)
     imgui.SetCursorPos(imgui.ImVec2(15, 12))
     toggleSetting(tr('keyboard_enable'), 'keyboard_overlay')
-    keyboardCardDrawList:AddLine(
-        imgui.ImVec2(keyboardCardPos.x + 15, keyboardCardPos.y + 48),
-        imgui.ImVec2(keyboardCardPos.x + keyboardCardWidth - 15, keyboardCardPos.y + 48),
-        imgui.GetColorU32(theme.separator), 1.0)
-    imgui.SetCursorPos(imgui.ImVec2(16, 57))
-    mutedText(tr('keyboard_color'))
-    imgui.SetCursorPos(imgui.ImVec2(16, 82))
-    drawColorPickerSetting(tr('keyboard_color'), 'keyboard', keyboardColorPicker, 'Keyboard')
-    imgui.SetCursorPos(imgui.ImVec2(310, 57))
+    imgui.SetCursorPos(imgui.ImVec2(16, 49))
+    mutedText(tr('normal_color'))
+    imgui.SetCursorPos(imgui.ImVec2(16, 70))
+    drawColorPickerSetting(tr('keyboard_color') .. ' — ' .. tr('normal_color'),
+        'keyboard', keyboardColorPicker, 'KeyboardNormal', true)
+    imgui.SetCursorPos(imgui.ImVec2(104, 49))
+    mutedText(tr('pressed_color'))
+    imgui.SetCursorPos(imgui.ImVec2(104, 70))
+    drawColorPickerSetting(tr('keyboard_color') .. ' — ' .. tr('pressed_color'),
+        'keyboard_pressed', keyboardPressedColorPicker, 'KeyboardPressed', true)
+    imgui.SetCursorPos(imgui.ImVec2(310, 49))
     local keyboardOpacityChanged, keyboardOpacityValue = slimSlider(tr('keyboard_opacity'), 'keyboardOpacity',
-        config.settings.keyboard_opacity, 0.0, 1.0, '%.2f', 230, false)
+        config.settings.keyboard_opacity, 0.20, 1.0, '%.2f', 230, false)
     if keyboardOpacityChanged then
         config.settings.keyboard_opacity = keyboardOpacityValue
         saveSettings()
@@ -3178,27 +3921,27 @@ local function drawOverlaySettings()
     imgui.EndChild()
     imgui.PopStyleColor()
 
-    imgui.Dummy(imgui.ImVec2(0, 8))
+    imgui.Dummy(imgui.ImVec2(0, 7))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
     imgui.BeginChild('##mouseOverlayCard',
-        imgui.ImVec2(imgui.GetContentRegionAvail().x, 132), true, NON_SCROLLING_CHILD_FLAGS)
+        imgui.ImVec2(imgui.GetContentRegionAvail().x, 104), false, NON_SCROLLING_CHILD_FLAGS)
     local mouseCardPos = imgui.GetWindowPos()
-    local mouseCardWidth = imgui.GetWindowWidth()
-    local mouseCardDrawList = imgui.GetWindowDrawList()
-    drawIosIcon('sensitivity', mouseCardPos.x + imgui.GetWindowWidth() - 44, mouseCardPos.y + 12, 28, true)
+    drawIosIcon('mouse', mouseCardPos.x + imgui.GetWindowWidth() - 44, mouseCardPos.y + 12, 28, true)
     imgui.SetCursorPos(imgui.ImVec2(15, 12))
     toggleSetting(tr('mouse_enable'), 'mouse_overlay')
-    mouseCardDrawList:AddLine(
-        imgui.ImVec2(mouseCardPos.x + 15, mouseCardPos.y + 48),
-        imgui.ImVec2(mouseCardPos.x + mouseCardWidth - 15, mouseCardPos.y + 48),
-        imgui.GetColorU32(theme.separator), 1.0)
-    imgui.SetCursorPos(imgui.ImVec2(16, 57))
-    mutedText(tr('mouse_color'))
-    imgui.SetCursorPos(imgui.ImVec2(16, 82))
-    drawColorPickerSetting(tr('mouse_color'), 'mouse', mouseColorPicker, 'Mouse')
-    imgui.SetCursorPos(imgui.ImVec2(310, 57))
+    imgui.SetCursorPos(imgui.ImVec2(16, 49))
+    mutedText(tr('normal_color'))
+    imgui.SetCursorPos(imgui.ImVec2(16, 70))
+    drawColorPickerSetting(tr('mouse_color') .. ' — ' .. tr('normal_color'),
+        'mouse', mouseColorPicker, 'MouseNormal', true)
+    imgui.SetCursorPos(imgui.ImVec2(104, 49))
+    mutedText(tr('pressed_color'))
+    imgui.SetCursorPos(imgui.ImVec2(104, 70))
+    drawColorPickerSetting(tr('mouse_color') .. ' — ' .. tr('pressed_color'),
+        'mouse_pressed', mousePressedColorPicker, 'MousePressed', true)
+    imgui.SetCursorPos(imgui.ImVec2(310, 49))
     local mouseOpacityChanged, mouseOpacityValue = slimSlider(tr('mouse_opacity'), 'mouseOpacity',
-        config.settings.mouse_opacity, 0.0, 1.0, '%.2f', 230, false)
+        config.settings.mouse_opacity, 0.20, 1.0, '%.2f', 230, false)
     if mouseOpacityChanged then
         config.settings.mouse_opacity = mouseOpacityValue
         saveSettings()
@@ -3206,43 +3949,41 @@ local function drawOverlaySettings()
     imgui.EndChild()
     imgui.PopStyleColor()
 
-    imgui.Dummy(imgui.ImVec2(0, 8))
-    mutedWrapped(tr('color_picker_hint'))
-    mutedWrapped(tr('overlay_style_hint'))
-    imgui.Dummy(imgui.ImVec2(0, 3))
-
+    imgui.Dummy(imgui.ImVec2(0, 7))
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##overlayAppearanceCard', imgui.ImVec2(imgui.GetContentRegionAvail().x, 132), true)
-    imgui.SetCursorPos(imgui.ImVec2(15, 8))
+    imgui.BeginChild('##overlayAppearanceCard', imgui.ImVec2(imgui.GetContentRegionAvail().x, 132), false,
+        NON_SCROLLING_CHILD_FLAGS)
+    imgui.SetCursorPos(imgui.ImVec2(15, 10))
     local scaleChanged, scaleValue = slimSlider(tr('overlay_scale'), 'overlayScale',
-        config.settings.overlay_scale, 0.25, 1.5, '%.2fx', 535, false)
+        config.settings.overlay_scale, 0.25, 0.75, '%.2fx', 255, false)
     if scaleChanged then
         config.settings.overlay_scale = scaleValue
         saveSettings()
     end
-
-    imgui.SetCursorPos(imgui.ImVec2(15, 47))
+    imgui.SetCursorPos(imgui.ImVec2(295, 10))
     local roundingChanged, roundingValue = slimSlider(tr('overlay_rounding'), 'overlayRounding',
-        config.settings.overlay_rounding, 0.0, 12.0, '%.1f px', 535, false)
+        config.settings.overlay_rounding, 0.0, 12.0, '%.1f px', 255, false)
     if roundingChanged then
         config.settings.overlay_rounding = roundingValue
         saveSettings()
     end
 
-    imgui.SetCursorPos(imgui.ImVec2(15, 86))
+    imgui.SetCursorPos(imgui.ImVec2(15, 50))
     local spacingChanged, spacingValue = slimSlider(tr('overlay_spacing'), 'overlaySpacing',
         config.settings.overlay_spacing, 2.0, 8.0, '%.1f px', 255, false)
     if spacingChanged then
         config.settings.overlay_spacing = spacingValue
         saveSettings()
     end
-    imgui.SetCursorPos(imgui.ImVec2(295, 86))
-    local borderChanged, borderValue = slimSlider(tr('overlay_border'), 'overlayBorder',
-        config.settings.overlay_border, 0.75, 3.0, '%.2f', 255, false)
-    if borderChanged then
-        config.settings.overlay_border = borderValue
+    imgui.SetCursorPos(imgui.ImVec2(295, 50))
+    local shadowChanged, shadowValue = slimSlider(tr('overlay_shadow'), 'overlayShadow',
+        config.settings.overlay_shadow, 0.0, 0.65, '%.2f', 255, false)
+    if shadowChanged then
+        config.settings.overlay_shadow = shadowValue
         saveSettings()
     end
+    imgui.SetCursorPos(imgui.ImVec2(15, 93))
+    mutedWrapped(tr('overlay_adjust_hint'), imgui.GetWindowWidth() - 30)
     imgui.EndChild()
     imgui.PopStyleColor()
 end
@@ -3388,6 +4129,10 @@ local function initializeImguiTheme()
         uiFonts.semibold = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 13.8, nil, ranges)
         uiFonts.title = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 18.5, nil, ranges)
         uiFonts.hero = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 22.0, nil, ranges)
+        overlayFonts.micro = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 6.4, nil, ranges)
+        overlayFonts.tiny = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 7.5, nil, ranges)
+        overlayFonts.small = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 9.0, nil, ranges)
+        overlayFonts.normal = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 10.5, nil, ranges)
         if imgui.RebuildFonts then
             imgui.RebuildFonts()
         end
@@ -3396,6 +4141,10 @@ local function initializeImguiTheme()
         uiFonts.semibold = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 13.8, nil, romanianGlyphRanges)
         uiFonts.title = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 18.5, nil, romanianGlyphRanges)
         uiFonts.hero = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 22.0, nil, romanianGlyphRanges)
+        overlayFonts.micro = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 6.4, nil, romanianGlyphRanges)
+        overlayFonts.tiny = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 7.5, nil, romanianGlyphRanges)
+        overlayFonts.small = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 9.0, nil, romanianGlyphRanges)
+        overlayFonts.normal = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 10.5, nil, romanianGlyphRanges)
     end
 
     applyTheme(config.settings.theme)
@@ -3409,7 +4158,8 @@ local function drawSidebarLiveCard(theme, cardWidth)
     local serverName = liveSidebarData()
     cardWidth = cardWidth or (UI_LAYOUT.sidebarWidth - UI_LAYOUT.sidebarInset * 2)
     imgui.PushStyleColor(CHILD_BG_COLOR, theme.panel)
-    imgui.BeginChild('##systemStatusCard', imgui.ImVec2(cardWidth, 110), false)
+    imgui.BeginChild('##systemStatusCard', imgui.ImVec2(cardWidth, 110), false,
+        NON_SCROLLING_CHILD_FLAGS)
 
     local rows = {
         { tr('player_name'), getLocalPlayerName() },
@@ -3480,7 +4230,7 @@ local function drawUpdateCenter(theme, notificationHovered)
     drawIosIcon('notification', centerPos.x + 15, centerPos.y + 14, 25, true)
     imgui.SetCursorPos(imgui.ImVec2(52, 15))
     local titlePushed = pushFont(uiFonts.semibold)
-    imgui.TextColored(theme.text, tr('notifications_update'))
+    imgui.TextColored(theme.text, tr('update_center_title'))
     popFont(titlePushed)
 
     imgui.SetCursorPos(imgui.ImVec2(width - 35, 8))
@@ -3532,7 +4282,10 @@ local function drawUpdateCenter(theme, notificationHovered)
         imgui.PushStyleColor(imgui.Col.ButtonHovered, color(226, 67, 67))
         imgui.PushStyleColor(imgui.Col.ButtonActive, color(178, 42, 42))
         imgui.PushStyleColor(imgui.Col.Text, color(255, 255, 255))
-        if imgui.Button(tr('update_now') .. '##installUpdate', imgui.ImVec2(143, 30)) then
+        local updateButtonFontPushed = pushFont(uiFonts.semibold)
+        local installClicked = imgui.Button(tr('update_now') .. '##installUpdate', imgui.ImVec2(143, 30))
+        popFont(updateButtonFontPushed)
+        if installClicked then
             Updater.installAvailableUpdate()
         end
         imgui.PopStyleColor(4)
@@ -3571,7 +4324,8 @@ local function drawMainMenu()
         rootAlphaPushed = true
     end
     local fontPushed = pushFont(uiFonts.body)
-    if imgui.Begin('##GangHelperBeta211', windowOpen, flags) then
+    if imgui.Begin('##GangHelper', windowOpen, flags) then
+        menuCheckpoint('root window opened')
         local theme = themes[config.settings.theme]
         local windowPos = imgui.GetWindowPos()
         local windowDrawList = imgui.GetWindowDrawList()
@@ -3641,15 +4395,20 @@ local function drawMainMenu()
                 4.0, imgui.GetColorU32(color(239, 76, 76)), 16)
         end
 
-        imgui.SetCursorPos(imgui.ImVec2(UI_LAYOUT.menuWidth - 35, 10))
+        imgui.SetCursorPos(imgui.ImVec2(UI_LAYOUT.menuWidth - 38, 8))
         imgui.PushStyleColor(imgui.Col.Button, color(0, 0, 0, 0))
         imgui.PushStyleColor(imgui.Col.ButtonHovered, theme.controlHover)
         imgui.PushStyleColor(imgui.Col.ButtonActive, theme.buttonActive)
-        imgui.PushStyleColor(imgui.Col.Text, theme.muted)
-        if imgui.Button('x##close', imgui.ImVec2(25, 25)) then
+        imgui.PushStyleColor(imgui.Col.Text, theme.text)
+        local closeFontPushed = pushFont(uiFonts.semibold)
+        local closeClicked = imgui.Button('X##close', imgui.ImVec2(30, 30))
+        popFont(closeFontPushed)
+        if closeClicked then
             requestMenu(false)
         end
         imgui.PopStyleColor(4)
+
+        menuCheckpoint('header rendered')
 
         imgui.SetCursorPos(imgui.ImVec2(0, UI_LAYOUT.headerHeight))
         imgui.PushStyleColor(CHILD_BG_COLOR, theme.side)
@@ -3674,6 +4433,8 @@ local function drawMainMenu()
         imgui.EndChild()
         imgui.PopStyleColor()
 
+        menuCheckpoint('sidebar rendered')
+
         imgui.SetCursorPos(imgui.ImVec2(UI_LAYOUT.sidebarWidth, UI_LAYOUT.headerHeight))
         imgui.PushStyleColor(CHILD_BG_COLOR, theme.bg)
         imgui.BeginChild('##content', imgui.ImVec2(UI_LAYOUT.contentWidth, bodyHeight), false)
@@ -3684,10 +4445,35 @@ local function drawMainMenu()
             pageAlphaPushed = true
         end
         imgui.PushStyleColor(CHILD_BG_COLOR, color(0, 0, 0, 0))
+        local pageViewportWidth = UI_LAYOUT.contentWidth - UI_LAYOUT.pageHorizontalMargin * 2
+        local pageViewportHeight = bodyHeight - UI_LAYOUT.pageTop - UI_LAYOUT.pageBottomMargin
+        local pageViewportPos = imgui.GetCursorScreenPos()
         imgui.BeginChild('##pageContent', imgui.ImVec2(
-            UI_LAYOUT.contentWidth - UI_LAYOUT.pageHorizontalMargin * 2,
-            bodyHeight - UI_LAYOUT.pageTop - UI_LAYOUT.pageBottomMargin), false)
+            pageViewportWidth, pageViewportHeight), false,
+            imgui.WindowFlags.NoScrollWithMouse or 0)
+        menuCheckpoint('page render started: ' .. tostring(currentPage))
         drawCurrentPage()
+        menuCheckpoint('page rendered: ' .. tostring(currentPage))
+        -- The wheel belongs exclusively to page scrolling. Routing it here
+        -- makes scrolling work over checkboxes, sliders, buttons and every
+        -- fixed card, consistently across legacy imgui and mimgui.
+        local scrollOk, wheel, mouseX, mouseY = pcall(function()
+            local io = imgui.GetIO()
+            return tonumber(io.MouseWheel) or 0,
+                tonumber(io.MousePos.x), tonumber(io.MousePos.y)
+        end)
+        if scrollOk and wheel ~= 0 and mouseX and mouseY
+                and mouseX >= pageViewportPos.x
+                and mouseX <= pageViewportPos.x + pageViewportWidth
+                and mouseY >= pageViewportPos.y
+                and mouseY <= pageViewportPos.y + pageViewportHeight then
+            pcall(function()
+                local nextScroll = imgui.GetScrollY() - wheel * 52
+                local maximum = type(imgui.GetScrollMaxY) == 'function'
+                    and imgui.GetScrollMaxY() or math.max(0, nextScroll)
+                imgui.SetScrollY(clamp(nextScroll, 0, maximum))
+            end)
+        end
         imgui.EndChild()
         imgui.PopStyleColor()
         if pageAlphaPushed then
@@ -3697,6 +4483,7 @@ local function drawMainMenu()
         imgui.PopStyleColor()
 
         drawUpdateCenter(theme, notificationHovered)
+        menuCheckpoint('update center rendered')
 
         local footerTextHeight = imgui.CalcTextSize('CONNECTED').y
         local footerLeftY = windowPos.y + footerY
@@ -3707,15 +4494,17 @@ local function drawMainMenu()
         windowDrawList:AddText(imgui.ImVec2(windowPos.x + 30, footerLeftY),
             imgui.GetColorU32(theme.muted), 'CONNECTED')
         local fps = tonumber(imgui.GetIO().Framerate) or currentFrameRate()
-        local fpsText = string.format('%3d FPS', math.floor(fps + 0.5))
+        local fpsNumber = tostring(math.floor(fps + 0.5))
+        local fpsNumberWidth = imgui.CalcTextSize(fpsNumber).x
         windowDrawList:AddText(imgui.ImVec2(windowPos.x + 109, footerLeftY),
             imgui.GetColorU32(theme.separator), '|')
-        windowDrawList:AddText(imgui.ImVec2(windowPos.x + 122, footerLeftY),
-            imgui.GetColorU32(theme.muted), fpsText)
+        windowDrawList:AddText(imgui.ImVec2(windowPos.x + 145 - fpsNumberWidth, footerLeftY),
+            imgui.GetColorU32(theme.muted), fpsNumber)
+        windowDrawList:AddText(imgui.ImVec2(windowPos.x + 151, footerLeftY),
+            imgui.GetColorU32(theme.muted), 'FPS')
 
         local footerRightEdge = windowPos.x + UI_LAYOUT.menuWidth - 18
-        local versionText = (config.settings.language == 2 and 'VERSION ' or 'VERSIUNEA ')
-            .. VERSION:upper()
+        local versionText = VERSION:upper()
         local versionTextSize = imgui.CalcTextSize(versionText)
         local authorText = 'BY SEMAKA'
         local authorTextSize = imgui.CalcTextSize(authorText)
@@ -3729,11 +4518,16 @@ local function drawMainMenu()
         windowDrawList:AddText(
             imgui.ImVec2(authorX, footerLeftY),
             imgui.GetColorU32(theme.muted), authorText)
+        menuCheckpoint('footer rendered')
     end
     imgui.End()
     popFont(fontPushed)
     if rootAlphaPushed then
         imgui.PopStyleVar()
+    end
+    if menuDiagnosticPending then
+        menuCheckpoint('frame complete')
+        menuDiagnosticPending = false
     end
 end
 
@@ -3758,6 +4552,15 @@ if legacyImgui then
     imgui.LockPlayer = false
     function imgui.OnDrawFrame()
         imgui.ShowCursor = menuShouldRender()
+        if not overlayRendererFailed
+                and (config.settings.keyboard_overlay or config.settings.mouse_overlay)
+                and Runtime.renderInputOverlays then
+            local rendered, renderError = pcall(Runtime.renderInputOverlays)
+            if not rendered then
+                overlayRendererFailed = true
+                ghChat(tr('overlay_error') .. ' ' .. tostring(renderError))
+            end
+        end
         if menuShouldRender() then
             safeDrawMainMenu()
         end
@@ -3779,46 +4582,36 @@ function Runtime.argb(alpha, red, green, blue)
     )
 end
 
-function Runtime.overlayColor(prefix, alpha)
-    return Runtime.argb(alpha,
-        config.settings[prefix .. '_r'],
-        config.settings[prefix .. '_g'],
-        config.settings[prefix .. '_b'])
+function Runtime.overlayImColor(prefix, alpha)
+    return imgui.ImVec4(
+        config.settings[prefix .. '_r'] / 255,
+        config.settings[prefix .. '_g'] / 255,
+        config.settings[prefix .. '_b'] / 255,
+        clamp(tonumber(alpha) or 1.0, 0.0, 1.0))
 end
 
-function Runtime.overlayContrastText(prefix, alpha)
+function Runtime.overlayContrastImColor(prefix, alpha)
     local red = config.settings[prefix .. '_r']
     local green = config.settings[prefix .. '_g']
     local blue = config.settings[prefix .. '_b']
-    local luminance = red * 0.299 + green * 0.587 + blue * 0.114
-    if luminance > 165 then
-        return Runtime.argb(alpha, 24, 24, 27)
-    end
-    return Runtime.argb(alpha, 255, 255, 255)
+    return Runtime.contrastImColor(red, green, blue, alpha)
 end
 
-function Runtime.renderRoundedBox(x, y, width, height, radius, boxColor)
-    if width <= 0 or height <= 0 then
-        return
+function Runtime.contrastImColor(red, green, blue, alpha)
+    local luminance = red * 0.299 + green * 0.587 + blue * 0.114
+    if luminance > 165 then
+        return imgui.ImVec4(24 / 255, 24 / 255, 27 / 255, alpha)
     end
-    radius = clamp(tonumber(radius) or 0, 0, math.min(width, height) / 2)
-    if radius < 1.0 then
-        renderDrawBox(x, y, width, height, boxColor)
-        return
-    end
+    return imgui.ImVec4(1.0, 1.0, 1.0, alpha)
+end
 
-    renderDrawBox(x + radius, y, math.max(0, width - radius * 2), height, boxColor)
-    renderDrawBox(x, y + radius, width, math.max(0, height - radius * 2), boxColor)
-    local segments = math.max(1, math.min(6, math.ceil(radius)))
-    local segmentHeight = radius / segments
-    for segment = 0, segments - 1 do
-        local rowY = segment * segmentHeight
-        local distance = radius - (rowY + segmentHeight * 0.5)
-        local inset = radius - math.sqrt(math.max(0, radius * radius - distance * distance))
-        local rowWidth = math.max(0, width - inset * 2)
-        renderDrawBox(x + inset, y + rowY, rowWidth, segmentHeight + 0.10, boxColor)
-        renderDrawBox(x + inset, y + height - rowY - segmentHeight, rowWidth, segmentHeight + 0.10, boxColor)
-    end
+function Runtime.overlayPressedColors(prefix, alpha)
+    local pressedPrefix = prefix .. '_pressed'
+    local red = config.settings[pressedPrefix .. '_r']
+    local green = config.settings[pressedPrefix .. '_g']
+    local blue = config.settings[pressedPrefix .. '_b']
+    local fill = imgui.ImVec4(red / 255, green / 255, blue / 255, alpha)
+    return fill, Runtime.contrastImColor(red, green, blue, alpha)
 end
 
 function Runtime.overlayDimensions(kind)
@@ -3832,55 +4625,72 @@ end
 
 function Runtime.currentOverlayFont()
     local scale = config.settings.overlay_scale
-    if scale < 0.42 then
-        return overlayFonts.tiny
-    elseif scale < 0.72 then
-        return overlayFonts.small
-    elseif scale < 1.18 then
-        return overlayFonts.normal
+    if scale <= 0.32 then
+        return overlayFonts.micro or uiFonts.body
+    elseif scale <= 0.45 then
+        return overlayFonts.tiny or uiFonts.body
+    elseif scale <= 0.62 then
+        return overlayFonts.small or uiFonts.body
     end
-    return overlayFonts.large
+    return overlayFonts.normal or uiFonts.body
 end
 
-function Runtime.drawOverlayTextCentered(font, text, x, y, width, height, textColor)
-    local renderedText = toGameEncoding(text)
-    local textWidth = renderGetFontDrawTextLength(font, renderedText)
-    local textHeight = renderGetFontDrawHeight(font)
-    renderFontDrawText(font, renderedText,
-        math.floor(x + (width - textWidth) / 2),
-        math.floor(y + (height - textHeight) / 2),
-        textColor)
+function Runtime.drawOverlayTextCentered(drawList, font, text, x, y, width, height, textColor)
+    local fontPushed = pushFont(font)
+    local textSize = imgui.CalcTextSize(text)
+    drawList:AddText(
+        imgui.ImVec2(math.floor(x + (width - textSize.x) / 2 + 0.5),
+            math.floor(y + (height - textSize.y) / 2 + 0.5)),
+        imgui.GetColorU32(textColor), text)
+    popFont(fontPushed)
 end
 
-function Runtime.drawOverlayKey(label, keyCode, x, y, width, height, prefix, forcedPressed)
+function Runtime.drawOverlayKey(drawList, label, keyCode, x, y, width, height, prefix, forcedPressed)
     local font = Runtime.currentOverlayFont()
     if not font then
         return
     end
-    local pressed = forcedPressed == true or (keyCode and isKeyDown(keyCode))
+    -- ImGui's antialiased rounded rectangles keep all four corners identical;
+    -- there are no overlapping polygons or scanlines at compact scales.
+    x, y = math.floor(x) + 0.5, math.floor(y) + 0.5
+    width, height = math.max(4, math.floor(width)), math.max(4, math.floor(height))
+    local pressed = forcedPressed ~= nil and forcedPressed == true
+        or (forcedPressed == nil and keyCode and isKeyDown(keyCode))
     local opacity = config.settings[prefix .. '_opacity']
     local scale = config.settings.overlay_scale
-    local radius = config.settings.overlay_rounding * scale
-    local border = math.max(0.6, config.settings.overlay_border * scale)
-    local outlineAlpha = math.floor(255 * opacity * (pressed and 1.0 or 0.82))
-    local inactiveAlpha = math.floor(255 * opacity * 0.18)
-    local pressedAlpha = math.floor(255 * opacity * 0.88)
-    local textAlpha = math.floor(255 * opacity)
-    local accent = Runtime.overlayColor(prefix, outlineAlpha)
-    local textColor = pressed and Runtime.overlayContrastText(prefix, textAlpha) or Runtime.overlayColor(prefix, textAlpha)
-    local shadowOffset = math.max(0.75, 1.5 * scale)
-    Runtime.renderRoundedBox(x, y + shadowOffset, width, height, radius, Runtime.argb(math.floor(90 * opacity), 0, 0, 0))
-    Runtime.renderRoundedBox(x, y, width, height, radius, accent)
-    Runtime.renderRoundedBox(x + border, y + border, width - border * 2, height - border * 2,
-        math.max(0, radius - border),
-        pressed and Runtime.overlayColor(prefix, pressedAlpha) or Runtime.overlayColor(prefix, inactiveAlpha))
-    Runtime.drawOverlayTextCentered(font, label, x, y, width, height, textColor)
+    local radius = clamp(config.settings.overlay_rounding * scale,
+        0.0, math.min(width, height) / 2)
+    local shadowStrength = clamp(tonumber(config.settings.overlay_shadow) or 0.28, 0.0, 0.65)
+    local minimum = imgui.ImVec2(x, y)
+    local maximum = imgui.ImVec2(x + width, y + height)
+    local shadowOffset = scale < 0.38 and 1.0 or 1.5
+    if shadowStrength > 0.001 then
+        local selectedLuminance = config.settings[prefix .. '_r'] * 0.299
+            + config.settings[prefix .. '_g'] * 0.587
+            + config.settings[prefix .. '_b'] * 0.114
+        local shadowColor = selectedLuminance < 72
+            and color(255, 255, 255, shadowStrength * 0.48 * opacity)
+            or color(0, 0, 0, shadowStrength * opacity)
+        drawList:AddRectFilled(imgui.ImVec2(x, y + shadowOffset),
+            imgui.ImVec2(x + width, y + height + shadowOffset),
+            imgui.GetColorU32(shadowColor), radius)
+    end
+
+    local fillColor, textColor
+    if pressed then
+        local pressedAlpha = math.max(opacity, 0.88)
+        fillColor, textColor = Runtime.overlayPressedColors(prefix, pressedAlpha)
+    else
+        local textAlpha = clamp(opacity + 0.18, 0.45, 1.0)
+        fillColor = Runtime.overlayImColor(prefix, opacity)
+        textColor = Runtime.overlayContrastImColor(prefix, textAlpha)
+    end
+    drawList:AddRectFilled(minimum, maximum, imgui.GetColorU32(fillColor), radius)
+    Runtime.drawOverlayTextCentered(drawList, font, label, x, y,
+        width, height, textColor)
 end
 
-local wheelUpUntil = 0
-local wheelDownUntil = 0
-
-function Runtime.drawKeyboardRenderOverlay()
+function Runtime.drawKeyboardRenderOverlay(drawList)
     if not Runtime.currentOverlayFont() then
         return
     end
@@ -3893,27 +4703,32 @@ function Runtime.drawKeyboardRenderOverlay()
     local numberWidth = keyWidth * 5 + gap * 4
     local rowX = x + (width - numberWidth) / 2
     for key = 49, 53 do
-        Runtime.drawOverlayKey(string.char(key), key, rowX, rowY, keyWidth, keyHeight, 'keyboard')
+        Runtime.drawOverlayKey(drawList, string.char(key), key,
+            rowX, rowY, keyWidth, keyHeight, 'keyboard')
         rowX = rowX + keyWidth + gap
     end
 
     rowY = rowY + keyHeight + gap
     local tabRowWidth = 55 * scale + keyWidth * 5 + gap * 5
     rowX = x + (width - tabRowWidth) / 2
-    Runtime.drawOverlayKey('TAB', 9, rowX, rowY, 55 * scale, keyHeight, 'keyboard')
+    Runtime.drawOverlayKey(drawList, 'TAB', 9,
+        rowX, rowY, 55 * scale, keyHeight, 'keyboard')
     rowX = rowX + 55 * scale + gap
     for _, key in ipairs({ 81, 87, 69, 82, 84 }) do
-        Runtime.drawOverlayKey(string.char(key), key, rowX, rowY, keyWidth, keyHeight, 'keyboard')
+        Runtime.drawOverlayKey(drawList, string.char(key), key,
+            rowX, rowY, keyWidth, keyHeight, 'keyboard')
         rowX = rowX + keyWidth + gap
     end
 
     rowY = rowY + keyHeight + gap
     local capsRowWidth = 64 * scale + keyWidth * 5 + gap * 5
     rowX = x + (width - capsRowWidth) / 2
-    Runtime.drawOverlayKey('CAPS', 20, rowX, rowY, 64 * scale, keyHeight, 'keyboard')
+    Runtime.drawOverlayKey(drawList, 'CAPS', 20,
+        rowX, rowY, 64 * scale, keyHeight, 'keyboard')
     rowX = rowX + 64 * scale + gap
     for _, key in ipairs({ 65, 83, 68, 70, 71 }) do
-        Runtime.drawOverlayKey(string.char(key), key, rowX, rowY, keyWidth, keyHeight, 'keyboard')
+        Runtime.drawOverlayKey(drawList, string.char(key), key,
+            rowX, rowY, keyWidth, keyHeight, 'keyboard')
         rowX = rowX + keyWidth + gap
     end
 
@@ -3921,10 +4736,12 @@ function Runtime.drawKeyboardRenderOverlay()
     local shiftWidth = 70 * scale
     local shiftRowWidth = shiftWidth + keyWidth * 4 + gap * 4
     rowX = x + (width - shiftRowWidth) / 2
-    Runtime.drawOverlayKey('SHIFT', 16, rowX, rowY, shiftWidth, keyHeight, 'keyboard')
+    Runtime.drawOverlayKey(drawList, 'SHIFT', 16,
+        rowX, rowY, shiftWidth, keyHeight, 'keyboard')
     rowX = rowX + shiftWidth + gap
     for _, key in ipairs({ 90, 88, 67, 86 }) do
-        Runtime.drawOverlayKey(string.char(key), key, rowX, rowY, keyWidth, keyHeight, 'keyboard')
+        Runtime.drawOverlayKey(drawList, string.char(key), key,
+            rowX, rowY, keyWidth, keyHeight, 'keyboard')
         rowX = rowX + keyWidth + gap
     end
 
@@ -3932,14 +4749,17 @@ function Runtime.drawKeyboardRenderOverlay()
     local ctrlWidth, altWidth, spaceWidth = 60 * scale, 50 * scale, 126 * scale
     local bottomRowWidth = ctrlWidth + altWidth + spaceWidth + gap * 2
     rowX = x + (width - bottomRowWidth) / 2
-    Runtime.drawOverlayKey('CTRL', 17, rowX, rowY, ctrlWidth, keyHeight, 'keyboard')
+    Runtime.drawOverlayKey(drawList, 'CTRL', 17,
+        rowX, rowY, ctrlWidth, keyHeight, 'keyboard')
     rowX = rowX + ctrlWidth + gap
-    Runtime.drawOverlayKey('ALT', 18, rowX, rowY, altWidth, keyHeight, 'keyboard')
+    Runtime.drawOverlayKey(drawList, 'ALT', 18,
+        rowX, rowY, altWidth, keyHeight, 'keyboard')
     rowX = rowX + altWidth + gap
-    Runtime.drawOverlayKey('SPACE', 32, rowX, rowY, spaceWidth, keyHeight, 'keyboard')
+    Runtime.drawOverlayKey(drawList, 'SPACE', 32,
+        rowX, rowY, spaceWidth, keyHeight, 'keyboard')
 end
 
-function Runtime.drawMouseRenderOverlay()
+function Runtime.drawMouseRenderOverlay(drawList)
     if not Runtime.currentOverlayFont() then
         return
     end
@@ -3947,26 +4767,37 @@ function Runtime.drawMouseRenderOverlay()
     local x, y = config.settings.mouse_x, config.settings.mouse_y
     local width = Runtime.overlayDimensions('mouse')
     local gap = config.settings.overlay_spacing * scale
+    local wheel = 0
+    pcall(function()
+        wheel = tonumber(imgui.GetIO().MouseWheel) or 0
+    end)
 
     local wheelWidth, wheelHeight = 46 * scale, 26 * scale
     local rowX, rowY = x + (width - wheelWidth) / 2, y + 2 * scale
-    Runtime.drawOverlayKey('WU', nil, rowX, rowY, wheelWidth, wheelHeight, 'mouse', getGameTimer() < wheelUpUntil)
+    Runtime.drawOverlayKey(drawList, 'WU', nil,
+        rowX, rowY, wheelWidth, wheelHeight, 'mouse', wheel > 0)
 
     local topRowWidth = (58 + 50 + 58) * scale + gap * 2
     rowX, rowY = x + (width - topRowWidth) / 2, rowY + wheelHeight + gap
-    Runtime.drawOverlayKey('LMB', 1, rowX, rowY, 58 * scale, 43 * scale, 'mouse')
+    Runtime.drawOverlayKey(drawList, 'LMB', 1,
+        rowX, rowY, 58 * scale, 43 * scale, 'mouse')
     rowX = rowX + 58 * scale + gap
-    Runtime.drawOverlayKey('MMB', 4, rowX, rowY, 50 * scale, 43 * scale, 'mouse')
+    Runtime.drawOverlayKey(drawList, 'MMB', 4,
+        rowX, rowY, 50 * scale, 43 * scale, 'mouse')
     rowX = rowX + 50 * scale + gap
-    Runtime.drawOverlayKey('RMB', 2, rowX, rowY, 58 * scale, 43 * scale, 'mouse')
+    Runtime.drawOverlayKey(drawList, 'RMB', 2,
+        rowX, rowY, 58 * scale, 43 * scale, 'mouse')
 
     local bottomRowWidth = (42 + 46 + 42) * scale + gap * 2
     rowX, rowY = x + (width - bottomRowWidth) / 2, rowY + 43 * scale + gap
-    Runtime.drawOverlayKey('M4', 5, rowX, rowY, 42 * scale, 28 * scale, 'mouse')
+    Runtime.drawOverlayKey(drawList, 'M4', 5,
+        rowX, rowY, 42 * scale, 28 * scale, 'mouse')
     rowX = rowX + 42 * scale + gap
-    Runtime.drawOverlayKey('WD', nil, rowX, rowY, 46 * scale, 28 * scale, 'mouse', getGameTimer() < wheelDownUntil)
+    Runtime.drawOverlayKey(drawList, 'WD', nil,
+        rowX, rowY, 46 * scale, 28 * scale, 'mouse', wheel < 0)
     rowX = rowX + 46 * scale + gap
-    Runtime.drawOverlayKey('M5', 6, rowX, rowY, 42 * scale, 28 * scale, 'mouse')
+    Runtime.drawOverlayKey(drawList, 'M5', 6,
+        rowX, rowY, 42 * scale, 28 * scale, 'mouse')
 end
 
 function Runtime.pointInside(x, y, left, top, width, height)
@@ -4013,51 +4844,52 @@ function Runtime.updateOverlayDragging()
 end
 
 function Runtime.renderInputOverlays()
-    Runtime.updateOverlayDragging()
+    if not config.settings.keyboard_overlay and not config.settings.mouse_overlay then
+        return
+    end
+    local display = imgui.GetIO().DisplaySize
+    local noInputFlags = imgui.WindowFlags.NoInputs
+        or ((imgui.WindowFlags.NoMouseInputs or 0)
+            + (imgui.WindowFlags.NoNavInputs or 0)
+            + (imgui.WindowFlags.NoNavFocus or 0))
+    local flags = (imgui.WindowFlags.NoTitleBar or 0)
+        + (imgui.WindowFlags.NoResize or 0)
+        + (imgui.WindowFlags.NoMove or 0)
+        + (imgui.WindowFlags.NoScrollbar or 0)
+        + (imgui.WindowFlags.NoScrollWithMouse or 0)
+        + (imgui.WindowFlags.NoSavedSettings or 0)
+        + noInputFlags
+        + (imgui.WindowFlags.NoBackground or 0)
+    imgui.SetNextWindowPos(imgui.ImVec2(0, 0), imgui.Cond.Always)
+    imgui.SetNextWindowSize(imgui.ImVec2(display.x, display.y), imgui.Cond.Always)
+    imgui.PushStyleVar(imgui.StyleVar.WindowPadding, imgui.ImVec2(0, 0))
+    imgui.PushStyleColor(imgui.Col.WindowBg, color(0, 0, 0, 0))
+    imgui.Begin('##GangHelperInputOverlayCanvas', nil, flags)
+    local drawList = imgui.GetWindowDrawList()
     if config.settings.keyboard_overlay then
-        Runtime.drawKeyboardRenderOverlay()
+        Runtime.drawKeyboardRenderOverlay(drawList)
     end
     if config.settings.mouse_overlay then
-        Runtime.drawMouseRenderOverlay()
+        Runtime.drawMouseRenderOverlay(drawList)
     end
+    imgui.End()
+    imgui.PopStyleColor()
+    imgui.PopStyleVar()
 end
 
-function Runtime.updateMouseWheelOverlay()
-    if not config.settings.mouse_overlay then
-        return
-    end
-    local menuActive = menuShouldRender()
-    local delta = 0
-    -- getMousewheelDelta may consume the native wheel event on older clients.
-    -- While the menu is open, leave that event entirely to ImGui scrolling.
-    if not menuActive then
-        local rawOk, rawDelta = pcall(getMousewheelDelta)
-        if rawOk and type(rawDelta) == 'number' then
-            delta = rawDelta
+if not legacyImgui then
+    Runtime.overlayFrame = imgui.OnFrame(function()
+        return not overlayRendererFailed
+            and (config.settings.keyboard_overlay or config.settings.mouse_overlay)
+    end, function()
+        local rendered, renderError = pcall(Runtime.renderInputOverlays)
+        if not rendered then
+            overlayRendererFailed = true
+            ghChat(tr('overlay_error') .. ' ' .. tostring(renderError))
         end
-    end
-    local imguiOk, imguiDelta = pcall(function()
-        return tonumber(imgui.GetIO().MouseWheel) or 0
     end)
-    if imguiOk and math.abs(imguiDelta) > math.abs(delta) then
-        delta = imguiDelta
-    end
-    if not menuActive then
-        if vkeys.VK_WHEELUP and wasKeyPressed(vkeys.VK_WHEELUP) then
-            delta = math.max(delta, 1)
-        elseif vkeys.VK_WHEELDOWN and wasKeyPressed(vkeys.VK_WHEELDOWN) then
-            delta = math.min(delta, -1)
-        end
-    end
-    if delta == 0 then
-        return
-    end
-    local activeUntil = getGameTimer() + 140
-    if delta > 0 then
-        wheelUpUntil = activeUntil
-    else
-        wheelDownUntil = activeUntil
-    end
+    Runtime.overlayFrame.LockPlayer = false
+    Runtime.overlayFrame.HideCursor = true
 end
 
 function Runtime.processKeyCapture()
@@ -4100,10 +4932,143 @@ function Runtime.pressedConfiguredKey(key)
     return key and key > 0 and wasKeyPressed(key)
 end
 
+function Runtime.trimText(value)
+    return tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
+end
+
+function Runtime.stripConfiguredClanTag(name)
+    name = Runtime.trimText(name)
+    if not config.settings.reconnect_remove_clan then
+        return name
+    end
+    local tag = Runtime.trimText(config.settings.reconnect_clan_tag)
+    if tag == '' then
+        return Runtime.trimText(name:gsub('^%b[][%s_%.%-]*', '', 1)
+            :gsub('^%b()[%s_%.%-]*', '', 1))
+    end
+    local loweredName, loweredTag = name:lower(), tag:lower()
+    local prefixes = {
+        '[' .. loweredTag .. ']', '(' .. loweredTag .. ')',
+        loweredTag .. '_', loweredTag .. '.', loweredTag .. '-'
+    }
+    for _, prefix in ipairs(prefixes) do
+        if loweredName:sub(1, #prefix) == prefix then
+            return Runtime.trimText(name:sub(#prefix + 1):gsub('^[%s_%.%-]+', ''))
+        end
+    end
+    return name
+end
+
+function Runtime.reconnectTarget()
+    local host = Runtime.trimText(config.settings.reconnect_host)
+    local port = math.floor(tonumber(config.settings.reconnect_port) or 7777)
+    local embeddedHost, embeddedPort = host:match('^([^:]+):(%d+)$')
+    if embeddedHost and embeddedPort then
+        host, port = embeddedHost, tonumber(embeddedPort)
+    end
+    if host == '' and type(rawget(_G, 'sampGetCurrentServerAddress')) == 'function' then
+        local addressOk, currentHost, currentPort = pcall(sampGetCurrentServerAddress)
+        if addressOk then
+            host = Runtime.trimText(currentHost)
+            port = tonumber(currentPort) or port
+        end
+    end
+    local nickname = Runtime.trimText(config.settings.reconnect_name)
+    if nickname == '' then
+        nickname = getLocalPlayerName()
+    end
+    nickname = Runtime.stripConfiguredClanTag(nickname):sub(1, 24)
+    if host == '' or port < 1 or port > 65535 or nickname == '' then
+        return nil
+    end
+    return host, port, nickname
+end
+
+function Runtime.performReconnect(reason)
+    if Runtime.reconnectAttemptActive then
+        return false
+    end
+    if type(rawget(_G, 'sampConnectToServer')) ~= 'function'
+            or type(rawget(_G, 'sampDisconnectWithReason')) ~= 'function' then
+        Runtime.reconnectStatus = 'idle'
+        ghChat(tr('reconnect_unavailable'))
+        return false
+    end
+    local host, port, nickname = Runtime.reconnectTarget()
+    if not host then
+        Runtime.reconnectStatus = 'idle'
+        ghChat(tr('reconnect_invalid'))
+        return false
+    end
+
+    Runtime.reconnectPending = false
+    Runtime.reconnectAttemptActive = true
+    Runtime.reconnectStatus = 'connecting'
+    Runtime.reconnectAttempts = Runtime.reconnectAttempts + 1
+    Runtime.suppressAutoReconnectUntil = getGameTimer() + 1500
+    lua_thread.create(function()
+        if type(rawget(_G, 'sampSetLocalPlayerName')) == 'function' then
+            pcall(sampSetLocalPlayerName, toGameEncoding(nickname))
+        end
+        pcall(sampDisconnectWithReason, false)
+        -- A short release window lets RakNet close the old peer before the
+        -- next address is assigned. It is deliberately independent of chat.
+        wait(120)
+        local connected = pcall(sampConnectToServer, host, port)
+        if not connected then
+            Runtime.reconnectStatus = 'idle'
+            ghChat(tr('reconnect_unavailable'))
+        end
+        wait(380)
+        Runtime.reconnectAttemptActive = false
+    end)
+    return true
+end
+
+function Runtime.scheduleReconnect(reason, delayMilliseconds)
+    if not config.settings.ultra_fast_connect then
+        return
+    end
+    local now = getGameTimer()
+    local configuredDelay = clamp(config.settings.reconnect_delay, 0.50, 5.00) * 1000
+    local delay = math.max(500, tonumber(delayMilliseconds) or configuredDelay)
+    Runtime.reconnectReason = tostring(reason or 'retry')
+    local nextAttempt = now + delay
+    Runtime.reconnectAt = Runtime.reconnectPending
+        and math.min(Runtime.reconnectAt, nextAttempt) or nextAttempt
+    Runtime.reconnectPending = true
+    Runtime.reconnectStatus = 'waiting'
+end
+
+function Runtime.startManualReconnect()
+    if Runtime.performReconnect('manual') then
+        ghChat(tr('reconnect_started'))
+    end
+end
+
+function Runtime.updateReconnect()
+    if not Runtime.reconnectPending or Runtime.reconnectAttemptActive then
+        return
+    end
+    if getGameTimer() >= Runtime.reconnectAt then
+        Runtime.performReconnect(Runtime.reconnectReason)
+    end
+end
+
 function Runtime.processServerBinds()
     if config.settings.profile == 1 then
         if Runtime.pressedConfiguredKey(config.settings.bzone_cancel_key) then
             sampSendChat('/omg')
+            -- B-ZONE completes this animation cancel when aim is pressed just
+            -- after /omg. Pulse RMB for one frame and always release it.
+            lua_thread.create(function()
+                wait(0)
+                if not isKeyDown(vkeys.VK_RBUTTON or 2) then
+                    pcall(setVirtualKeyDown, vkeys.VK_RBUTTON or 2, true)
+                    wait(0)
+                    pcall(setVirtualKeyDown, vkeys.VK_RBUTTON or 2, false)
+                end
+            end)
             return true
         elseif Runtime.pressedConfiguredKey(config.settings.bzone_cocaine_key) then
             sampSendChat('/usedrugs cocaine')
@@ -4332,13 +5297,10 @@ function Runtime.setOptionalWorldFeature(name, value)
 end
 
 function Runtime.applySampFpsBoost(enabled)
-    local density = enabled and 0.0 or 1.0
-    pcall(function() setCarDensityMultiplier(density) end)
-    pcall(function() setPedDensityMultiplier(density) end)
-    pcall(function() setGenerateCarsAroundCamera(not enabled) end)
+    -- Only local decorative effects are touched. Network players, SA-MP
+    -- vehicles and server-controlled entities are never hidden or modified.
     pcall(function() switchRubbish(not enabled) end)
     Runtime.setOptionalWorldFeature('switchAmbientPlanes', not enabled)
-    Runtime.setOptionalWorldFeature('switchRandomTrains', not enabled)
     Runtime.setOptionalWorldFeature('setCloudsEnabled', not enabled)
     Runtime.setOptionalWorldFeature('setBirdsEnabled', not enabled)
 end
@@ -4588,12 +5550,50 @@ function Runtime.playerWeaponId(playerId)
     return 0
 end
 
+function Runtime.validWorldVector(vector)
+    if type(vector) ~= 'table' then
+        return false
+    end
+    for _, axis in ipairs({ 'x', 'y', 'z' }) do
+        local value = tonumber(vector[axis])
+        if not value or value ~= value or math.abs(value) > 20000 then
+            return false
+        end
+    end
+    return true
+end
+
+function Runtime.localAimDirection()
+    local ok, cameraX, cameraY, cameraZ = pcall(getActiveCameraCoordinates)
+    local pointOk, pointX, pointY, pointZ = pcall(getActiveCameraPointAt)
+    if not ok or not pointOk then
+        return nil
+    end
+    cameraX, cameraY, cameraZ = tonumber(cameraX), tonumber(cameraY), tonumber(cameraZ)
+    pointX, pointY, pointZ = tonumber(pointX), tonumber(pointY), tonumber(pointZ)
+    if not cameraX or not cameraY or not cameraZ or not pointX or not pointY or not pointZ then
+        return nil
+    end
+    local directionX, directionY, directionZ =
+        pointX - cameraX, pointY - cameraY, pointZ - cameraZ
+    local length = math.sqrt(directionX * directionX
+        + directionY * directionY + directionZ * directionZ)
+    if length < 0.0001 then
+        return nil
+    end
+    return directionX / length, directionY / length, directionZ / length
+end
+
 function Runtime.addBulletTrace(playerId, data)
     if not config.settings.bullet_track or type(data) ~= 'table' and type(data) ~= 'cdata' then
         return
     end
-    local origin, target = Runtime.bulletVector(data, 'origin'), Runtime.bulletVector(data, 'target')
-    if not origin or not target then
+    local origin = Runtime.bulletVector(data, 'origin')
+    local target = Runtime.bulletVector(data, 'target')
+    -- center-of-hit can legitimately be {0, 0, 0} for a shot that did not hit
+    -- an entity. It must never decide the trajectory; origin and target are
+    -- the authoritative BulletSync segment.
+    if not Runtime.validWorldVector(origin) then
         return
     end
     local targetType, targetId, packetWeaponId = 0, -1, 0
@@ -4603,7 +5603,8 @@ function Runtime.addBulletTrace(playerId, data)
         packetWeaponId = tonumber(data.weaponId) or 0
     end)
     local localId = getLocalPlayerId()
-    local targetsLocalPlayer = targetType == 1 and targetId == localId
+    local hitPlayer = targetType == 1 and targetId >= 0
+    local targetsLocalPlayer = hitPlayer and targetId == localId
     local coordinatesOk, localX, localY, localZ = pcall(getCharCoordinates, PLAYER_PED)
     if not coordinatesOk then
         return
@@ -4613,19 +5614,33 @@ function Runtime.addBulletTrace(playerId, data)
     if distance > config.settings.bullet_track_distance and not targetsLocalPlayer then
         return
     end
-    local vectorX = target.x - origin.x
-    local vectorY = target.y - origin.y
-    local vectorZ = target.z - origin.z
-    local rawLength = math.sqrt(vectorX * vectorX + vectorY * vectorY + vectorZ * vectorZ)
-    if rawLength < 0.05 then
-        return
-    end
     -- BulletSyncData carries the weapon used for this exact shot. Prefer it
     -- over the ped's current weapon, which can already have changed by the
     -- time this frame is rendered.
     local weaponId = packetWeaponId > 0 and packetWeaponId
         or Runtime.playerWeaponId(playerId)
     local weaponRange = bulletWeaponRanges[weaponId] or 100.0
+    local vectorX, vectorY, vectorZ, rawLength
+    if Runtime.validWorldVector(target) then
+        vectorX = target.x - origin.x
+        vectorY = target.y - origin.y
+        vectorZ = target.z - origin.z
+        rawLength = math.sqrt(vectorX * vectorX + vectorY * vectorY + vectorZ * vectorZ)
+    end
+    if not rawLength or rawLength < 0.05 or rawLength > 5000 then
+        -- Some SA-MP builds send an empty target for a local miss. Rebuild
+        -- only that malformed local shot from the actual camera aim vector;
+        -- valid packet targets are never altered.
+        if playerId ~= localId then
+            return
+        end
+        local aimX, aimY, aimZ = Runtime.localAimDirection()
+        if not aimX then
+            return
+        end
+        vectorX, vectorY, vectorZ = aimX, aimY, aimZ
+        rawLength = weaponRange
+    end
     local traceLength = math.min(rawLength, weaponRange)
     local unitX, unitY, unitZ = vectorX / rawLength, vectorY / rawLength, vectorZ / rawLength
     target = {
@@ -4644,6 +5659,9 @@ function Runtime.addBulletTrace(playerId, data)
         weaponId = weaponId,
         weaponRange = weaponRange,
         length = traceLength,
+        targetType = targetType,
+        targetId = targetId,
+        hitPlayer = hitPlayer,
         targetsLocalPlayer = targetsLocalPlayer
     }
     while #Runtime.bulletTraces > Runtime.maxBulletTraces do
@@ -4669,6 +5687,51 @@ if sampEventsAvailable and type(sampev) == 'table' then
         Runtime.lastServerWeather = clamp(tonumber(weatherId) or 0, 0, 255)
     end
 
+    function sampev.onGamemodeRestart()
+        Runtime.scheduleReconnect('gamemode_restart', 500)
+    end
+
+    function sampev.onConnectionNoFreeSlot()
+        Runtime.scheduleReconnect('server_full')
+    end
+
+    function sampev.onConnectionAttemptFailed()
+        Runtime.scheduleReconnect('attempt_failed')
+    end
+
+    function sampev.onConnectionLost()
+        Runtime.injectionMessageShown = false
+        Runtime.injectionMessageQueued = false
+        Runtime.scheduleReconnect('connection_lost')
+    end
+
+    function sampev.onConnectionClosed()
+        Runtime.injectionMessageShown = false
+        Runtime.injectionMessageQueued = false
+        if getGameTimer() > (Runtime.suppressAutoReconnectUntil or 0) then
+            Runtime.scheduleReconnect('connection_closed')
+        end
+    end
+
+    function sampev.onConnectionRequestAccepted()
+        Runtime.reconnectPending = false
+        Runtime.reconnectAttemptActive = false
+        Runtime.reconnectStatus = 'idle'
+        Runtime.reconnectAttempts = 0
+        Runtime.lastReconnectAcceptedAt = getGameTimer()
+        Runtime.queueInjectionMessage()
+    end
+
+    function sampev.onConnectionBanned()
+        Runtime.reconnectPending = false
+        Runtime.reconnectStatus = 'idle'
+    end
+
+    function sampev.onConnectionPasswordInvalid()
+        Runtime.reconnectPending = false
+        Runtime.reconnectStatus = 'idle'
+    end
+
     function sampev.onSendDeathNotification()
         if config.settings.change_skin then
             Runtime.changeSkinDeathGraceUntil = getGameTimer() + 12000
@@ -4677,6 +5740,7 @@ if sampEventsAvailable and type(sampev) == 'table' then
     end
 
     function sampev.onSendSpawn()
+        Runtime.queueInjectionMessage()
         if config.settings.change_skin then
             Runtime.changeSkinDeathGraceUntil = getGameTimer() + 5000
             Runtime.changeSkinApplyPending = true
@@ -4705,11 +5769,18 @@ end
 
 function Runtime.projectWorldPoint(point)
     if type(convert3DCoordsToScreenEx) == 'function' then
-        local ok, first, second, third = pcall(convert3DCoordsToScreenEx,
+        local ok, first, second, third, depth = pcall(convert3DCoordsToScreenEx,
             point.x, point.y, point.z, true, true)
         if ok and type(first) == 'boolean' then
-            return first and tonumber(second) and tonumber(third) and second or nil,
-                first and tonumber(second) and tonumber(third) and third or nil
+            if not first or not tonumber(second) or not tonumber(third) then
+                return nil, nil
+            end
+            local screenX = tonumber(second)
+            if tonumber(depth) and tonumber(depth) < 1 then
+                local screenWidth = getScreenResolution()
+                screenX = tonumber(screenWidth) - screenX
+            end
+            return screenX, tonumber(third)
         elseif ok and tonumber(first) and tonumber(second) then
             return first, second
         end
@@ -4737,100 +5808,55 @@ function Runtime.renderBulletTracks()
         return
     end
     local now = getGameTimer()
-    local durationMs = math.max(250, config.settings.bullet_track_duration * 1000)
+    local durationMs = clamp(config.settings.bullet_track_duration, 0.25, 5.0) * 1000
     for index = #Runtime.bulletTraces, 1, -1 do
         local trace = Runtime.bulletTraces[index]
         local age = now - trace.created
         if age < 0 or age > durationMs then
             table.remove(Runtime.bulletTraces, index)
         else
-            local normalizedAge = clamp(age / durationMs, 0.0, 1.0)
-            local fadeStart = 0.48
-            local fade = normalizedAge <= fadeStart and 1.0
-                or math.pow(clamp((1.0 - normalizedAge) / (1.0 - fadeStart), 0.0, 1.0), 1.2)
-            local revealLinear = clamp(age / 70.0, 0.0, 1.0)
-            local reveal = 1.0 - math.pow(1.0 - revealLinear, 3.0)
-            local visibleStartT = trace.targetsLocalPlayer
-                and math.max(0.0, 1.0 - math.min(30.0, trace.length) / trace.length)
-                or 0.0
-            local visibleEndT = visibleStartT + (1.0 - visibleStartT) * reveal
-            if visibleEndT > visibleStartT + 0.0001 then
-                local startX, startY = Runtime.projectWorldPoint(
-                    Runtime.tracePoint(trace, visibleStartT))
-                local endX, endY = Runtime.projectWorldPoint(
-                    Runtime.tracePoint(trace, visibleEndT))
-                if startX and startY and endX and endY then
-                    local screenDx, screenDy = endX - startX, endY - startY
-                    local screenLength = math.sqrt(screenDx * screenDx + screenDy * screenDy)
-                    if screenLength > 1.0 then
-                        local coreRed = math.min(255, math.floor(trace.red * 0.55 + 115))
-                        local coreGreen = math.min(255, math.floor(trace.green * 0.55 + 115))
-                        local coreBlue = math.min(255, math.floor(trace.blue * 0.55 + 115))
-                        local emphasis = trace.targetsLocalPlayer and 1.18 or 1.0
-
-                        -- Continuous trajectory, matching the reference style,
-                        -- with a restrained shadow, colored glow and crisp core.
-                        renderDrawLine(startX, startY, endX, endY, 6.2 * emphasis,
-                            Runtime.argb(math.floor(52 * fade), 0, 0, 0))
-                        renderDrawLine(startX, startY, endX, endY, 4.1 * emphasis,
-                            Runtime.argb(math.floor(88 * fade),
-                                trace.red, trace.green, trace.blue))
-                        renderDrawLine(startX, startY, endX, endY, 1.35 * emphasis,
-                            Runtime.argb(math.floor(235 * fade),
-                                coreRed, coreGreen, coreBlue))
-
-                        local travelLinear = clamp(age / (trace.targetsLocalPlayer and 115.0 or 150.0),
-                            0.0, 1.0)
-                        local travel = 1.0 - math.pow(1.0 - travelLinear, 3.0)
-                        local bulletT = visibleStartT + (1.0 - visibleStartT) * travel
-                        local bulletTail = math.min(0.10,
-                            math.max(0.015, 1.6 / math.max(trace.length, 0.05)))
-                        local bulletBackT = math.max(visibleStartT, bulletT - bulletTail)
-                        local bulletX, bulletY = Runtime.projectWorldPoint(
-                            Runtime.tracePoint(trace, bulletT))
-                        local bulletBackX, bulletBackY = Runtime.projectWorldPoint(
-                            Runtime.tracePoint(trace, bulletBackT))
-                        if bulletX and bulletY and bulletBackX and bulletBackY then
-                            local bulletDx, bulletDy = bulletX - bulletBackX, bulletY - bulletBackY
-                            local bulletLength = math.sqrt(bulletDx * bulletDx + bulletDy * bulletDy)
-                            if bulletLength > 0.6 then
-                                local ux, uy = bulletDx / bulletLength, bulletDy / bulletLength
-                                local sideX, sideY = -uy, ux
-                                local tipX, tipY = bulletX + ux * 2.2, bulletY + uy * 2.2
-                                local baseX, baseY = bulletX - ux * 6.5, bulletY - uy * 6.5
-                                local bulletGlow = Runtime.argb(math.floor(125 * fade),
-                                    trace.red, trace.green, trace.blue)
-                                local bulletCore = Runtime.argb(math.floor(250 * fade),
-                                    coreRed, coreGreen, coreBlue)
-                                renderDrawLine(bulletBackX, bulletBackY, bulletX, bulletY,
-                                    7.0 * emphasis, bulletGlow)
-                                renderDrawLine(bulletBackX, bulletBackY, bulletX, bulletY,
-                                    2.7 * emphasis, bulletCore)
-                                renderDrawLine(tipX, tipY,
-                                    baseX + sideX * 3.0, baseY + sideY * 3.0,
-                                    1.25 * emphasis, bulletCore)
-                                renderDrawLine(tipX, tipY,
-                                    baseX - sideX * 3.0, baseY - sideY * 3.0,
-                                    1.25 * emphasis, bulletCore)
-                                pcall(renderDrawPolygon, bulletX, bulletY,
-                                    3.2 * emphasis, 3.2 * emphasis, 8, 0, bulletCore)
-                            end
-                        end
-
-                        if reveal > 0.98 then
-                            local impactX, impactY = Runtime.projectWorldPoint(trace.target)
-                            if impactX and impactY then
-                                local impactSize = trace.targetsLocalPlayer and 6.5 or 4.8
-                                pcall(renderDrawPolygon, impactX, impactY,
-                                    impactSize, impactSize, 4, 45,
-                                    Runtime.argb(math.floor(68 * fade),
-                                        trace.red, trace.green, trace.blue))
-                                pcall(renderDrawPolygon, impactX, impactY,
-                                    2.2, 2.2, 4, 45,
-                                    Runtime.argb(math.floor(210 * fade),
-                                        coreRed, coreGreen, coreBlue))
-                            end
-                        end
+            -- Valid packet segments are rendered directly. There is no moving
+            -- capsule, interpolation, or reveal animation that could alter
+            -- the perceived direction.
+            local startX, startY = Runtime.projectWorldPoint(trace.origin)
+            local endX, endY = Runtime.projectWorldPoint(trace.target)
+            if startX and startY and endX and endY then
+                local screenDx, screenDy = endX - startX, endY - startY
+                local screenLength = math.sqrt(screenDx * screenDx + screenDy * screenDy)
+                if screenLength > 1.0 then
+                    local fade = age <= durationMs * 0.86 and 1.0
+                        or clamp((durationMs - age) / math.max(1, durationMs * 0.14), 0.0, 1.0)
+                    local traceColor = Runtime.argb(math.floor(255 * fade),
+                        trace.red, trace.green, trace.blue)
+                    local coreColor = trace.hitPlayer
+                        and Runtime.argb(math.floor(255 * fade), 255, 198, 62)
+                        or Runtime.argb(math.floor(220 * fade), 245, 245, 248)
+                    local shadowColor = Runtime.argb(math.floor(105 * fade), 0, 0, 0)
+                    local emphasis = trace.targetsLocalPlayer and 1.20 or 1.0
+                    renderDrawLine(startX, startY, endX, endY,
+                        4.2 * emphasis, shadowColor)
+                    renderDrawLine(startX, startY, endX, endY,
+                        2.35 * emphasis, traceColor)
+                    renderDrawLine(startX, startY, endX, endY,
+                        trace.hitPlayer and 1.15 * emphasis or 0.72 * emphasis,
+                        coreColor)
+                    if trace.hitPlayer then
+                        -- A player hit keeps the shooter's TAB color on the
+                        -- trajectory, while the impact itself is unmistakable.
+                        pcall(renderDrawPolygon, endX, endY - 1,
+                            9.0 * emphasis, 9.0 * emphasis, 4, 45, shadowColor)
+                        pcall(renderDrawPolygon, endX, endY - 1,
+                            7.0 * emphasis, 7.0 * emphasis, 4, 45, coreColor)
+                        pcall(renderDrawPolygon, endX, endY - 1,
+                            3.0 * emphasis, 3.0 * emphasis, 12, 0,
+                            Runtime.argb(math.floor(255 * fade), 255, 255, 255))
+                    else
+                        -- Same crisp polygon endpoint used by the supplied
+                        -- btrack reference, now with a subtle bright center.
+                        pcall(renderDrawPolygon, endX, endY - 1,
+                            5.5 * emphasis, 5.5 * emphasis, 8, 50, traceColor)
+                        pcall(renderDrawPolygon, endX, endY - 1,
+                            2.2 * emphasis, 2.2 * emphasis, 8, 50, coreColor)
                     end
                 end
             end
@@ -4856,12 +5882,6 @@ addEventHandler('onScriptTerminate', function(scr)
                 end
             end)
         end
-        for name, font in pairs(overlayFonts) do
-            if font then
-                renderReleaseFont(font)
-                overlayFonts[name] = nil
-            end
-        end
     end
 end)
 
@@ -4873,14 +5893,14 @@ function main()
     sampRegisterChatCommand('gh', function()
         toggleMenu()
     end)
-    -- SA:MP is available at this point. Publish on the very next frame, with no
-    -- login/spawn timer and no artificial delay.
-    lua_thread.create(function()
-        wait(0)
-        showInjectionMessage()
-    end)
+    -- Do not wait for connection/spawn events: isSampAvailable() already
+    -- guarantees that the SA-MP chat API exists. queueInjectionMessage adds
+    -- the requested single wait(0) and sends both short lines immediately.
+    Runtime.queueInjectionMessage()
 
-    if config.settings.update_auto_check and Updater.updaterConfigured() then
+    if Updater.automaticChecksEnabled
+            and config.settings.update_auto_check
+            and Updater.updaterConfigured() then
         lua_thread.create(function()
             wait(Updater.checkDelay)
             Updater.checkForUpdates()
@@ -4891,17 +5911,6 @@ function main()
         local themeInitialized, themeError = pcall(initializeImguiTheme)
         if not themeInitialized then
             ghChat(tr('font_error') .. ' ' .. tostring(themeError))
-        end
-    end
-
-    local overlayFontSizes = { tiny = 5, small = 7, normal = 10, large = 12 }
-    for name, size in pairs(overlayFontSizes) do
-        local created, font = pcall(renderCreateFont, 'Segoe UI', size, 5)
-        if created and font then
-            overlayFonts[name] = font
-        else
-            overlayRendererFailed = true
-            break
         end
     end
 
@@ -4933,11 +5942,13 @@ function main()
         updateInterfaceAnimations()
         if legacyImgui then
             imgui.Process = menuShouldRender()
+                or config.settings.keyboard_overlay or config.settings.mouse_overlay
             imgui.ShowCursor = menuShouldRender()
         end
-        Runtime.updateMouseWheelOverlay()
+        Runtime.updateOverlayDragging()
         Runtime.updateWorldOverrides()
         Runtime.updateChangeSkin()
+        Runtime.updateReconnect()
         Runtime.applyFpsLock(false)
         local now = getGameTimer()
         if now >= Runtime.nextUtilityRefresh then
@@ -4953,14 +5964,6 @@ function main()
                 Runtime.bulletTraces = {}
             end
         end
-        if not overlayRendererFailed then
-            local rendered, renderError = pcall(Runtime.renderInputOverlays)
-            if not rendered then
-                overlayRendererFailed = true
-                ghChat(tr('overlay_error') .. ' ' .. tostring(renderError))
-            end
-        end
-
         if captureField then
             Runtime.processKeyCapture()
         elseif Runtime.gameInputAvailable() then
