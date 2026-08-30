@@ -1,0 +1,22 @@
+{
+  "version": "v2.1.4",
+  "file_name": "GangHelper.lua",
+  "download_url": "https://raw.githubusercontent.com/semaka47/GangHelper/v2.1.4/GangHelper.lua",
+  "sha256": "17bdd639a2ec6ae2086ad7c996f4bb69ff4851089d9071bed635b5068cd31bfe",
+  "changelog_ro": [
+    "Rotița funcționează atât pe pagina principală, cât și exclusiv în lista de arme atunci când aceasta este deschisă.",
+    "Toate setările au autosave, iar la prima instalare funcțiile și overlay-urile sunt dezactivate.",
+    "A fost eliminat spamul din chat atunci când arma configurată lipsește din inventar.",
+    "Mouse Overlay include un indicator smooth pentru direcția mouse-ului.",
+    "Bullet Track folosește implicit culorile TAB, cu o culoare preferată opțională și contrast separat la HIT.",
+    "Inițializarea fonturilor, overlay-urilor și hook-urilor este amânată până după conectarea SA-MP."
+  ],
+  "changelog_en": [
+    "The wheel works on the main page and exclusively inside the weapon list while that list is open.",
+    "All settings now autosave, while every feature and overlay starts disabled on a first installation.",
+    "Removed chat spam when the configured weapon is missing from the inventory.",
+    "Mouse Overlay includes a smooth mouse-direction indicator.",
+    "Bullet Track uses TAB colors by default, with an optional preferred color and separate HIT contrast.",
+    "Font, overlay and hook initialization is deferred until after the SA-MP connection."
+  ]
+}

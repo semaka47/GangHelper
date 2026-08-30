@@ -1,0 +1,89 @@
+name: Publish v2.1.4
+on:
+  push:
+    branches:
+      - publish-v2.1.4
+    paths:
+      - .github/workflows/publish-v2.1.4.yml
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout publisher branch
+        uses: actions/checkout@v4
+
+      - name: Rebuild exact release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .publish-v2.1.4/thin.part00 .publish-v2.1.4/thin.part01 .publish-v2.1.4/thin.part02 | base64 -d > /tmp/GangHelper-v2.1.4-thin.bundle
+          git bundle verify /tmp/GangHelper-v2.1.4-thin.bundle
+
+      - name: Publish exact release commit and tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" /tmp/release-repo
+          cd /tmp/release-repo
+          git fetch /tmp/GangHelper-v2.1.4-thin.bundle refs/heads/main:refs/remotes/release/main refs/tags/v2.1.4:refs/tags/v2.1.4
+          test "$(git rev-parse refs/remotes/release/main)" = "caf36015a47e0c7adabc72dc11fc7210b757a40a"
+          test "$(git rev-parse 'refs/tags/v2.1.4^{}')" = "caf36015a47e0c7adabc72dc11fc7210b757a40a"
+          git push origin refs/remotes/release/main:refs/heads/main
+          git push origin refs/tags/v2.1.4
+
+      - name: Verify tagged script SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in {1..12}; do
+            if curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/v2.1.4/GangHelper.lua" -o /tmp/GangHelper.lua; then
+              ACTUAL="$(sha256sum /tmp/GangHelper.lua | awk '{print $1}')"
+              if [ "$ACTUAL" = "17bdd639a2ec6ae2086ad7c996f4bb69ff4851089d9071bed635b5068cd31bfe" ]; then
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+          echo "Tagged GangHelper.lua SHA-256 verification failed" >&2
+          exit 1
+
+      - name: Publish updater manifest separately
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /tmp/release-repo
+          git checkout -B main refs/remotes/release/main
+          cp "$GITHUB_WORKSPACE/.publish-v2.1.4/manifest.json" updater/manifest.json
+          git config user.name "semaka47"
+          git config user.email "konnybzone0@gmail.com"
+          git add updater/manifest.json
+          git commit -m "Publish updater manifest for v2.1.4"
+          git push origin main
+
+      - name: Verify public updater manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in {1..12}; do
+            if curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/updater/manifest.json" -o /tmp/public-manifest.json; then
+              python - <<'PY'
+          import json
+          with open('/tmp/public-manifest.json', encoding='utf-8') as f:
+              m = json.load(f)
+          assert m['version'] == 'v2.1.4'
+          assert m['download_url'] == 'https://raw.githubusercontent.com/semaka47/GangHelper/v2.1.4/GangHelper.lua'
+          assert m['sha256'] == '17bdd639a2ec6ae2086ad7c996f4bb69ff4851089d9071bed635b5068cd31bfe'
+          PY
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
