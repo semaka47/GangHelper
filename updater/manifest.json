@@ -1,20 +1,22 @@
 {
-  "version": "v2.1.3",
+  "version": "v2.1.4",
   "file_name": "GangHelper.lua",
-  "download_url": "https://raw.githubusercontent.com/semaka47/GangHelper/v2.1.3/GangHelper.lua",
-  "sha256": "48b345a29e16695106e48a78a79cbdbb2704fb53b406ed4c826d94ca49985ba6",
+  "download_url": "https://raw.githubusercontent.com/semaka47/GangHelper/v2.1.4/GangHelper.lua",
+  "sha256": "17bdd639a2ec6ae2086ad7c996f4bb69ff4851089d9071bed635b5068cd31bfe",
   "changelog_ro": [
-  "Meniul principal a fost actualizat, iar fiecare detaliu vizual a fost analizat și îmbunătățit.",
-  "A fost adăugată o culoare separată pentru tastele apăsate în Keyboard Overlay.",
-  "Tastele din Keyboard Overlay au fost redesenate și finisate.",
-  "Bullet Track folosește acum o culoare distinctă pentru loviturile confirmate asupra jucătorilor.",
-  "Compatibilitatea cu MoonImGui legacy la deschiderea meniului a fost reparată."
+    "Rotița funcționează atât pe pagina principală, cât și exclusiv în lista de arme atunci când aceasta este deschisă.",
+    "Toate setările au autosave, iar la prima instalare funcțiile și overlay-urile sunt dezactivate.",
+    "A fost eliminat spamul din chat atunci când arma configurată lipsește din inventar.",
+    "Mouse Overlay include un indicator smooth pentru direcția mouse-ului.",
+    "Bullet Track folosește implicit culorile TAB, cu o culoare preferată opțională și contrast separat la HIT.",
+    "Inițializarea fonturilor, overlay-urilor și hook-urilor este amânată până după conectarea SA-MP."
   ],
   "changelog_en": [
-  "The main menu has been updated, with every visual detail reviewed and improved.",
-  "A separate color setting for pressed keys has been added to the Keyboard Overlay.",
-  "The keys in the Keyboard Overlay have been redesigned and polished.",
-  "Bullet Track now uses a distinct color for confirmed hits on players.",
-  "Legacy MoonImGui compatibility when opening the menu has been fixed."
+    "The wheel works on the main page and exclusively inside the weapon list while that list is open.",
+    "All settings now autosave, while every feature and overlay starts disabled on a first installation.",
+    "Removed chat spam when the configured weapon is missing from the inventory.",
+    "Mouse Overlay includes a smooth mouse-direction indicator.",
+    "Bullet Track uses TAB colors by default, with an optional preferred color and separate HIT contrast.",
+    "Font, overlay and hook initialization is deferred until after the SA-MP connection."
   ]
 }
