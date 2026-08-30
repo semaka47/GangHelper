@@ -2,15 +2,17 @@
   "version": "v2.1.5",
   "file_name": "GangHelper.lua",
   "download_url": "https://raw.githubusercontent.com/semaka47/GangHelper/v2.1.5/GangHelper.lua",
-  "sha256": "4e3cf7052d87ed7d9a8ab56057819c755cff19c8e768e429b5b3a6c3a363dd94",
+  "sha256": "d91a62217b2a729ce80a63d67076f25e7f2399f73ac50df198a727d5c4798d2f",
   "changelog_ro": [
     "Au fost eliminate mesajele locale Gang Helper din chat.",
-    "Vânzarea armelor selectează corect cel mai apropiat jucător stream-uit din raza configurată.",
+    "Vânzarea armelor a fost corectată: ID-ul celui mai apropiat jucător stream-uit este ales automat, arma vine din alias, iar prețul este fix 1.",
+    "Exemplu: /sdgl trimite automat /sellgun ID deagle 1; aliasurile implicite sunt /sdgl, /sm4, /srif și /ssg.",
     "Auto Accept procesează separat ofertele simultane de arme de la jucători diferiți."
   ],
   "changelog_en": [
     "Removed local Gang Helper messages from chat.",
-    "Weapon selling now correctly targets the nearest streamed player inside the configured range.",
-    "Auto Accept now processes simultaneous gun offers from different players independently."
+    "Gun selling was fixed: the nearest streamed player ID is selected automatically, the weapon comes from the alias, and the price is fixed at 1.",
+    "Example: /sdgl automatically sends /sellgun ID deagle 1; default aliases are /sdgl, /sm4, /srif and /ssg.",
+    "Auto Accept processes simultaneous gun offers from different players independently."
   ]
 }
