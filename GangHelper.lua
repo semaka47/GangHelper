@@ -3335,7 +3335,13 @@ executeWeaponAction = function(actionType, weapon, template)
         return
     end
     local actionKey = actionType .. ':' .. weapon.command
-    sampSendChat(toGameEncoding(antiRepeatMessage(actionKey, message)))
+    if message:sub(1, 1) == '/' then
+        -- Slash commands must use SA-MP's command RPC. Sending them through
+        -- sampSendChat can make the server parse them as incomplete chat text.
+        sampSendCommand(toGameEncoding(message))
+    else
+        sampSendChat(toGameEncoding(antiRepeatMessage(actionKey, message)))
+    end
     if actionType == 'sell' then
         ghChat(tr('sell_target') .. ' ' .. playerName .. ' [' .. playerId .. ']')
     else
