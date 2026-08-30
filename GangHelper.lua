@@ -1,8 +1,8 @@
 script_name('GangHelper')
 script_author('SeMaKa')
-script_version('2.1.4')
-script_version_number(20104)
-script_description('Gang Helper 2.1.4 recovery test with a zero-touch SA-MP handshake and exclusive wheel routing.')
+script_version('2.1.5')
+script_version_number(20105)
+script_description('Gang Helper 2.1.5 with silent chat notifications, reliable nearby gun sales, and concurrent gun auto-accept.')
 
 require 'lib.moonloader'
 
@@ -155,7 +155,7 @@ if encodingAvailable then
     encoding.default = 'CP1250'
 end
 
-local VERSION = 'v2.1.4'
+local VERSION = 'v2.1.5'
 local CONFIG_NAME = 'gang_helper'
 local LEGACY_CONFIG_NAME = 'gang_helper_by_semaka'
 local DEFAULT_SENSITIVITY = 0.002500
@@ -561,7 +561,7 @@ local translations = {
         send = 'Trimite',
         cancel = 'Renunță',
         sellgun_distance = 'Distanță maximă pentru țintă',
-        sellgun_hint = 'Sunt acceptați doar jucători apropiați, stream-uiți, pe ecran și cu un nume vizibil. Variabile: {id}, {weapon}, {name}.',
+        sellgun_hint = 'Sunt acceptați jucătorii apropiați și stream-uiți care au un nume disponibil. Variabile: {id}, {weapon}, {name}.',
         sell_weapon = 'Vinde',
         sell_no_target = 'nu există un jucător eligibil în apropiere sau numele este ascuns.',
         sell_target = 'ofertă pregătită pentru',
@@ -786,7 +786,7 @@ local translations = {
         send = 'Send',
         cancel = 'Cancel',
         sellgun_distance = 'Maximum target distance',
-        sellgun_hint = 'Only nearby, streamed, on-screen players with a visible name are accepted. Variables: {id}, {weapon}, {name}.',
+        sellgun_hint = 'Nearby streamed players with an available name are accepted. Variables: {id}, {weapon}, {name}.',
         sell_weapon = 'Sell',
         sell_no_target = 'no eligible nearby player was found or the name is hidden.',
         sell_target = 'offer prepared for',
@@ -1705,24 +1705,13 @@ local function currentSessionLabel()
     return string.format('%02d:%02d:%02d', hours, minutes, seconds)
 end
 
-local function ghChat(message)
-    local whiteMessage = tostring(message or ''):gsub('{%x%x%x%x%x%x}', '')
-    sampAddChatMessage(toGameEncoding(GH_CHAT_PREFIX .. ' {FFFFFF}' .. whiteMessage), -1)
+local function ghChat(_)
+    -- Keep Gang Helper completely silent in the SA-MP chat. UI feedback stays
+    -- inside the menu; gameplay/server chat is never altered here.
 end
 
 local function showInjectionMessage()
-    local firstLine, secondLine
-    if config.settings.language == 2 then
-        firstLine = GH_CHAT_PREFIX .. ' {FFFFFF}was injected successfully.'
-        secondLine = '{FFFFFF}Use the {808080}Del {FFFFFF}key or the {808080}/gh {FFFFFF}command.'
-    else
-        firstLine = GH_CHAT_PREFIX .. ' {FFFFFF}s-a injectat cu succes.'
-        secondLine = '{FFFFFF}Foloseste tasta {808080}Del {FFFFFF}sau comanda {808080}/gh'
-    end
-    -- SA-MP truncates long chat entries. Keep the gradient on the first line
-    -- and the full instruction on a separate short line.
-    sampAddChatMessage(toGameEncoding(firstLine), -1)
-    sampAddChatMessage(toGameEncoding(secondLine), -1)
+    -- Intentionally silent. The user requested no Gang Helper chat notices.
 end
 
 function Runtime.queueInjectionMessage()
@@ -2097,18 +2086,28 @@ local function extractGunOfferPlayerId(text)
     return findConnectedPlayerByName(clean)
 end
 
-local lastAutoAcceptAt = -2000
+local autoAcceptPending = {}
+local autoAcceptLastOfferAt = {}
 function Runtime.bindServerMessageHandler(events)
     function events.onServerMessage(_, text)
         if not config.settings.auto_accept_gun then
             return
         end
         local playerId = extractGunOfferPlayerId(text)
-        local now = getGameTimer()
-        if not playerId or now - lastAutoAcceptAt < 1500 then
+        if not playerId then
             return
         end
-        lastAutoAcceptAt = now
+
+        local now = getGameTimer()
+        local lastOfferAt = autoAcceptLastOfferAt[playerId] or -5000
+        -- Server messages for the same offer may be repeated. De-duplicate only
+        -- per player so offers from two different people are never discarded.
+        if autoAcceptPending[playerId] or now - lastOfferAt < 1000 then
+            return
+        end
+        autoAcceptLastOfferAt[playerId] = now
+        autoAcceptPending[playerId] = true
+
         lua_thread.create(function()
             local startedAt = getGameTimer()
             local outsideSince = nil
@@ -2116,13 +2115,14 @@ function Runtime.bindServerMessageHandler(events)
                 wait(50)
                 local tick = getGameTimer()
                 if tick - startedAt > 45000 then
+                    autoAcceptPending[playerId] = nil
                     return
                 end
                 if doesCharExist(PLAYER_PED) and not isCharInAnyCar(PLAYER_PED) then
                     outsideSince = outsideSince or tick
                     if tick - outsideSince >= config.settings.auto_accept_delay then
                         sampSendChat('/accept gun ' .. playerId)
-                        ghChat(tr('auto_accept_sent') .. ': ' .. playerId)
+                        autoAcceptPending[playerId] = nil
                         return
                     end
                 else
@@ -2131,6 +2131,7 @@ function Runtime.bindServerMessageHandler(events)
                     outsideSince = nil
                 end
             end
+            autoAcceptPending[playerId] = nil
         end)
     end
 end
@@ -3253,20 +3254,9 @@ local function nameLooksCovered(nickname)
         or name:find('namecover', 1, true) ~= nil
 end
 
-local function playerHasVisibleName(playerId, ped)
-    if not isCharOnScreen(ped) then
-        return false
-    end
+local function playerHasUsableName(playerId)
     local nickname = sampGetPlayerNickname(playerId)
-    if nameLooksCovered(nickname) then
-        return false
-    end
-    local ok, playerColor = pcall(sampGetPlayerColor, playerId)
-    if ok and type(playerColor) == 'number'
-        and bit.band(bit.rshift(playerColor, 24), 0xFF) == 0 then
-        return false
-    end
-    return true
+    return not nameLooksCovered(nickname)
 end
 
 local function findNearestVisiblePlayer(maxDistance)
@@ -3277,11 +3267,11 @@ local function findNearestVisiblePlayer(maxDistance)
     for playerId = 0, 1003 do
         if playerId ~= localId and sampIsPlayerConnected(playerId) then
             local streamed, ped = sampGetCharHandleBySampPlayerId(playerId)
-            if streamed and doesCharExist(ped) then
+            if streamed and doesCharExist(ped) and playerHasUsableName(playerId) then
                 local px, py, pz = getCharCoordinates(ped)
                 local dx, dy, dz = px - x, py - y, pz - z
                 local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
-                if distance <= nearestDistance and playerHasVisibleName(playerId, ped) then
+                if distance <= nearestDistance then
                     nearestId = playerId
                     nearestName = sampGetPlayerNickname(playerId)
                     nearestDistance = distance
