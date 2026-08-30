@@ -1,4 +1,4 @@
-# Gang Helper — v2.1.3
+# Gang Helper — v2.1.4
 
 **Gang Helper** este un mod Lua pentru SA-MP/MoonLoader care reunește într-un singur meniu funcții pentru arme, sensibilitate, comenzi rapide, overlay-uri și optimizarea experienței de joc. Interfața este disponibilă în română și engleză, cu teme Light și Dark și profiluri dedicate serverelor B-ZONE și BUGGED.
 
@@ -23,7 +23,7 @@
 
 ## Actualizări automate
 
-`v2.1.3` este ultima versiune care trebuie instalată manual. Pentru versiunile următoare, Gang Helper verifică automat dacă există un update și afișează un punct roșu pe clopoțel.
+`v2.1.3` a fost ultima versiune care a necesitat instalare manuală. `v2.1.4` este distribuită prin updaterul integrat, care afișează un punct roșu pe clopoțel atunci când există o versiune nouă.
 
 Actualizarea pornește numai după confirmarea utilizatorului. Fișierul descărcat este verificat prin SHA-256, versiunea curentă este salvată ca backup, iar scriptul este înlocuit și reîncărcat automat.
 

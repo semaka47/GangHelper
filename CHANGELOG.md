@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.1.4 — setări persistente, scroll și overlay-uri
+
+- rotița paginii principale funcționează inclusiv peste controale, iar lista deschisă din Weapon Switch preia exclusiv scroll-ul cât cursorul se află în interiorul ei;
+- toate setările sunt salvate automat, iar la prima instalare funcțiile și overlay-urile sunt oprite;
+- mesajele despre arme lipsă nu mai produc spam în chat;
+- Mouse Overlay include o linie smooth care urmărește direcția mouse-ului;
+- Bullet Track folosește implicit culorile jucătorilor din TAB, permite opțional o culoare preferată și evidențiază HIT-urile prin contrast alb/negru;
+- fonturile, overlay-urile și hook-urile SAMP.Events sunt inițializate după conectare.
+
 ## v2.1.3 — versiunea finală și update-uri GitHub
 
 - updaterul este conectat definitiv la manifestul public din `semaka47/GangHelper`; nu mai există niciun placeholder;

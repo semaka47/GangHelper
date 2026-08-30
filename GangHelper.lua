@@ -1,8 +1,8 @@
 script_name('GangHelper')
 script_author('SeMaKa')
-script_version('2.1.3')
-script_version_number(20103)
-script_description('Gang Helper 2.1.3 final with GitHub updates, precise bullet traces and customizable overlays.')
+script_version('2.1.4')
+script_version_number(20104)
+script_description('Gang Helper 2.1.4 recovery test with a zero-touch SA-MP handshake and exclusive wheel routing.')
 
 require 'lib.moonloader'
 
@@ -144,14 +144,18 @@ local function uiEndItemWidth(pushed)
         imgui.PopItemWidth()
     end
 end
-local sampEventsAvailable, sampev = pcall(require, 'lib.samp.events')
-sampEventsAvailable = sampEventsAvailable and type(sampev) == 'table'
+-- Loading SAMP.Events installs RakNet packet hooks immediately. Keep that
+-- library out of SA-MP's initial connection handshake and attach it only after
+-- the client reaches AWAIT_JOIN/CONNECTED. Until the load is attempted we keep
+-- feature availability optimistic so saved Bullet Track/bind settings are not
+-- erased merely because their dependency is intentionally deferred.
+local sampEventsAvailable = true
 local encodingAvailable, encoding = pcall(require, 'encoding')
 if encodingAvailable then
     encoding.default = 'CP1250'
 end
 
-local VERSION = 'v2.1.3'
+local VERSION = 'v2.1.4'
 local CONFIG_NAME = 'gang_helper'
 local LEGACY_CONFIG_NAME = 'gang_helper_by_semaka'
 local DEFAULT_SENSITIVITY = 0.002500
@@ -161,9 +165,10 @@ local Updater = {
     -- filename and can therefore replace this script without a client pack.
     manifestUrl = 'https://raw.githubusercontent.com/semaka47/GangHelper/main/updater/manifest.json',
     checkDelay = 2500,
-    -- Public release: check the stable manifest once after SA-MP starts.
-    -- Installation still happens only after the user confirms it in the menu.
-    automaticChecksEnabled = true,
+    -- Keep automatic network checks disabled in this local recovery build.
+    -- This exactly matches the user-confirmed diagnostic-10 baseline; the
+    -- public final can enable the check only after this build is tested.
+    automaticChecksEnabled = false,
     centerOpen = false,
     state = 'idle',
     message = '',
@@ -179,6 +184,7 @@ local Runtime = {
     fpsOriginalMemory = {},
     fpsMemoryCaptured = false,
     fpsFeaturesApplied = false,
+    fpsBoostApplied = false,
     lastAppliedFpsLimit = nil,
     fpsLastCounter = nil,
     sampFpsPatches = {},
@@ -207,7 +213,23 @@ local Runtime = {
     lastReconnectAcceptedAt = 0,
     suppressAutoReconnectUntil = 0,
     injectionMessageShown = false,
-    injectionMessageQueued = false
+    injectionMessageQueued = false,
+    connectionAccepted = false,
+    settingsSavePending = false,
+    settingsWritesAllowed = false,
+    settingsWriteUnlockAt = 0,
+    settingsFingerprint = nil,
+    nextSettingsAutoSave = 0,
+    mouseDirectionX = 0.0,
+    mouseDirectionY = 0.0,
+    mouseDirectionLastTick = 0,
+    mouseLastCursorX = nil,
+    mouseLastCursorY = nil,
+    imguiThemeInitialized = false,
+    sampEventsLoaded = false,
+    sampEventsLoadAttempted = false,
+    sampEvents = nil,
+    clientReady = false
 }
 local UI_LAYOUT = {
     menuWidth = 800,
@@ -282,6 +304,8 @@ local defaults = {
         theme_mode = 2,
         visual_defaults_2122 = false,
         visual_defaults_213 = false,
+        clean_features_214 = false,
+        clean_features_214_recovery = false,
         open_on_delete = true,
 
         bzone_cancel_key = vkeys.VK_X,
@@ -293,7 +317,7 @@ local defaults = {
         weapon_switch = false,
         sensitivity_fix = false,
 
-        update_auto_check = true,
+        update_auto_check = false,
 
         infinite_run = false,
         fps_boost = false,
@@ -305,8 +329,12 @@ local defaults = {
         weather_override = false,
         weather_id = 0,
         bullet_track = false,
+        bullet_custom_color = false,
         bullet_track_distance = 45.0,
         bullet_track_duration = 0.85,
+        bullet_r = 0,
+        bullet_g = 122,
+        bullet_b = 255,
         change_skin = false,
         change_skin_id = 0,
 
@@ -395,12 +423,36 @@ local function configFileExists(name)
 end
 
 local configSource = CONFIG_NAME
-if not configFileExists(CONFIG_NAME) and configFileExists(LEGACY_CONFIG_NAME) then
-    -- One-time, non-destructive migration: load the user's old settings and
-    -- save them under gang_helper.ini after validation below.
-    configSource = LEGACY_CONFIG_NAME
+do
+    local currentConfigExists = configFileExists(CONFIG_NAME)
+    local legacyConfigExists = configFileExists(LEGACY_CONFIG_NAME)
+    if not currentConfigExists and legacyConfigExists then
+        -- One-time, non-destructive migration: load the user's old settings
+        -- and save them under gang_helper.ini after validation below.
+        configSource = LEGACY_CONFIG_NAME
+    end
 end
 local config = inicfg.load(deepCopy(defaults), configSource) or deepCopy(defaults)
+
+-- v2.1.4 performs one clean activation reset even when an older INI exists.
+-- The marker is persisted immediately below; after this one migration every
+-- choice made by the user is preserved normally across restarts.
+if config.settings.clean_features_214_recovery ~= true then
+    for _, field in ipairs({
+        'weapon_switch', 'sensitivity_fix', 'infinite_run', 'fps_boost',
+        'fps_lock', 'fps_unlocker', 'time_override', 'weather_override',
+        'bullet_track', 'bullet_custom_color', 'change_skin', 'ultra_fast_connect',
+        'reconnect_remove_clan', 'auto_accept_gun', 'update_auto_check',
+        'keyboard_overlay', 'mouse_overlay'
+    }) do
+        config.settings[field] = false
+    end
+    for _, weapon in ipairs(sensitivityWeapons) do
+        config.settings['sens_override_' .. weapon.id] = false
+    end
+    config.settings.clean_features_214 = true
+    config.settings.clean_features_214_recovery = true
+end
 
 local windowOpen = uiBool(false)
 local currentPage = 1
@@ -547,9 +599,13 @@ local translations = {
         world_hint = 'Ora acceptă 0–23, iar vremea folosește ID-urile stabile GTA SA 0–22. Debifarea redă controlul jocului/serverului.',
         bullet_track_title = 'BULLET-TRACK',
         bullet_track = 'Afișează direcția gloanțelor',
-        bullet_track_hint = 'Afișează traseul real origin → target primit de la SA-MP, inclusiv focurile în aer. Lungimea respectă raza armei, iar loviturile în jucători primesc un marcaj distinct.',
+        bullet_track_hint = 'Afișează traseul real origin → target primit de la SA-MP, inclusiv focurile în aer. Implicit folosește culoarea fiecărui jucător din TAB, respectă raza armei și evidențiază loviturile confirmate.',
         bullet_track_distance = 'Distanță locală',
         bullet_track_duration = 'Durată traseu',
+        bullet_track_custom_color = 'Folosește culoare preferată',
+        bullet_track_color = 'Culoare preferată',
+        bullet_track_tab_color = 'Implicit: culoarea fiecărui jucător din TAB.',
+        bullet_track_color_hint = 'Culoarea aleasă înlocuiește culorile TAB. HIT-urile rămân evidențiate automat.',
         bullet_library_missing = 'bullet-track necesită biblioteca SAMP.Lua (lib.samp.events).',
         change_skin_title = 'CHANGESKIN',
         change_skin = 'Activează skinul local',
@@ -768,9 +824,13 @@ local translations = {
         world_hint = 'Time accepts 0–23 and weather uses the stable GTA SA IDs 0–22. Disabling gives control back to the game/server.',
         bullet_track_title = 'BULLET-TRACK',
         bullet_track = 'Show bullet direction',
-        bullet_track_hint = 'Shows the real origin → target path received from SA-MP, including shots fired into the air. Length follows the weapon range, and player hits receive a distinct marker.',
+        bullet_track_hint = 'Shows the real origin → target path received from SA-MP, including shots fired into the air. By default it uses each player\'s TAB color, follows weapon range, and highlights confirmed hits.',
         bullet_track_distance = 'Local distance',
         bullet_track_duration = 'Trace duration',
+        bullet_track_custom_color = 'Use preferred color',
+        bullet_track_color = 'Preferred color',
+        bullet_track_tab_color = 'Default: each player\'s TAB color.',
+        bullet_track_color_hint = 'The selected color replaces TAB colors. Player hits remain highlighted automatically.',
         bullet_library_missing = 'bullet-track requires SAMP.Lua (lib.samp.events).',
         change_skin_title = 'CHANGESKIN',
         change_skin = 'Enable local skin',
@@ -974,6 +1034,7 @@ local function clampSettings()
     s.weather_override = s.weather_override == true
     s.weather_id = clamp(tonumber(s.weather_id) or defaults.settings.weather_id, 0, 22)
     s.bullet_track = s.bullet_track == true and sampEventsAvailable
+    s.bullet_custom_color = s.bullet_custom_color == true
     s.bullet_track_distance = clamp(tonumber(s.bullet_track_distance)
         or defaults.settings.bullet_track_distance, 10.0, 100.0)
     s.bullet_track_duration = clamp(tonumber(s.bullet_track_duration)
@@ -1028,7 +1089,9 @@ local function clampSettings()
     s.sellgun_distance = clamp(tonumber(s.sellgun_distance) or 8.0, 2.0, 25.0)
     s.keyboard_overlay = s.keyboard_overlay == true
     s.mouse_overlay = s.mouse_overlay == true
-    for _, prefix in ipairs({ 'keyboard', 'keyboard_pressed', 'mouse', 'mouse_pressed' }) do
+    for _, prefix in ipairs({
+        'keyboard', 'keyboard_pressed', 'mouse', 'mouse_pressed', 'bullet'
+    }) do
         s[prefix .. '_r'] = clamp(tonumber(s[prefix .. '_r']) or defaults.settings[prefix .. '_r'], 0, 255)
         s[prefix .. '_g'] = clamp(tonumber(s[prefix .. '_g']) or defaults.settings[prefix .. '_g'], 0, 255)
         s[prefix .. '_b'] = clamp(tonumber(s[prefix .. '_b']) or defaults.settings[prefix .. '_b'], 0, 255)
@@ -1083,17 +1146,22 @@ end
 
 clampSettings()
 themeToggleAnim = config.settings.theme == 1 and 1.0 or 0.0
-inicfg.save(config, CONFIG_NAME)
+-- Loading and normalizing settings must remain read-only. A synchronous INI
+-- write here (or on the first connected frame) can stall some modpacks for
+-- exactly ten seconds. Settings are saved only after a real user change.
+Runtime.settingsSavePending = false
 
 local keyboardColorPicker = uiFloat4()
 local keyboardPressedColorPicker = uiFloat4()
 local mouseColorPicker = uiFloat4()
 local mousePressedColorPicker = uiFloat4()
+Runtime.bulletColorPicker = uiFloat4()
 Runtime.uiBuffers = {
     keyboardHex = uiBuffer(8),
     keyboardPressedHex = uiBuffer(8),
     mouseHex = uiBuffer(8),
     mousePressedHex = uiBuffer(8),
+    bulletHex = uiBuffer(8),
     reconnectHost = uiBuffer(129),
     reconnectName = uiBuffer(25),
     reconnectClan = uiBuffer(17)
@@ -1102,13 +1170,24 @@ local colorBufferNames = {
     keyboard = 'keyboardHex',
     keyboard_pressed = 'keyboardPressedHex',
     mouse = 'mouseHex',
-    mouse_pressed = 'mousePressedHex'
+    mouse_pressed = 'mousePressedHex',
+    bullet = 'bulletHex'
 }
 local function colorHexBuffer(prefix)
     return Runtime.uiBuffers[colorBufferNames[prefix]]
 end
-local romanianGlyphRanges = ffi.new('unsigned short[5]', { 0x0020, 0x024F, 0x2013, 0x2014, 0 })
-local legacyRomanianGlyphRanges = nil
+-- Keep only the ranges used by RO/EN interface text. The previous broad
+-- 0x0020-0x024F range was rebuilt eight times and made legacy MoonImGui stall
+-- around connection time on slower systems.
+local romanianGlyphRanges = ffi.new('unsigned short[11]', {
+    0x0020, 0x00FF,
+    0x0102, 0x0103,
+    0x0218, 0x021B,
+    0x2013, 0x2014,
+    0x2192, 0x2192,
+    0
+})
+Runtime.asciiGlyphRanges = ffi.new('unsigned short[3]', { 0x0020, 0x007E, 0 })
 
 local function setTextBuffer(buffer, size, value)
     local text = tostring(value or '')
@@ -1156,12 +1235,17 @@ local function syncTextBuffers()
     uiSet(mousePressedColorPicker, config.settings.mouse_pressed_g / 255, 1)
     uiSet(mousePressedColorPicker, config.settings.mouse_pressed_b / 255, 2)
     uiSet(mousePressedColorPicker, 1.0, 3)
+    uiSet(Runtime.bulletColorPicker, config.settings.bullet_r / 255, 0)
+    uiSet(Runtime.bulletColorPicker, config.settings.bullet_g / 255, 1)
+    uiSet(Runtime.bulletColorPicker, config.settings.bullet_b / 255, 2)
+    uiSet(Runtime.bulletColorPicker, 1.0, 3)
     setTextBuffer(Runtime.uiBuffers.keyboardHex, 8, Runtime.colorHex('keyboard'))
     setTextBuffer(Runtime.uiBuffers.keyboardPressedHex, 8,
         Runtime.colorHex('keyboard_pressed'))
     setTextBuffer(Runtime.uiBuffers.mouseHex, 8, Runtime.colorHex('mouse'))
     setTextBuffer(Runtime.uiBuffers.mousePressedHex, 8,
         Runtime.colorHex('mouse_pressed'))
+    setTextBuffer(Runtime.uiBuffers.bulletHex, 8, Runtime.colorHex('bullet'))
     setTextBuffer(Runtime.uiBuffers.reconnectHost, 129, config.settings.reconnect_host)
     setTextBuffer(Runtime.uiBuffers.reconnectName, 25, config.settings.reconnect_name)
     setTextBuffer(Runtime.uiBuffers.reconnectClan, 17, config.settings.reconnect_clan_tag)
@@ -1186,9 +1270,60 @@ local function profileName()
     return config.settings.profile == 1 and 'B-ZONE' or 'BUGGED'
 end
 
-local function saveSettings()
-    inicfg.save(config, CONFIG_NAME)
+function Runtime.currentSettingsFingerprint()
+    local keys = {}
+    for key in pairs(config.settings) do
+        keys[#keys + 1] = tostring(key)
+    end
+    table.sort(keys)
+    local parts = {}
+    for _, key in ipairs(keys) do
+        local value = config.settings[key]
+        parts[#parts + 1] = key .. '=' .. type(value) .. ':' .. tostring(value)
+    end
+    return table.concat(parts, '\31')
 end
+
+local function saveSettings(force)
+    Runtime.settingsSavePending = true
+    if not force and not Runtime.settingsWritesAllowed then
+        -- MoonLoader, SA-MP and some antivirus filters can contend for files
+        -- during the connection handshake. Queue the write until the player
+        -- is spawned instead of blocking GTA's only game/render thread.
+        return true
+    end
+    local saveStartedAt = tonumber(getGameTimer()) or 0
+    local saved, result = pcall(inicfg.save, config, CONFIG_NAME)
+    local saveFinishedAt = tonumber(getGameTimer()) or saveStartedAt
+    local saveDuration = saveFinishedAt - saveStartedAt
+    if saveDuration < 0 then
+        saveDuration = saveDuration + 4294967296
+    end
+    if saveDuration >= 100 then
+        print('[Gang Helper] settings save duration: ' .. tostring(saveDuration) .. ' ms')
+    end
+    if saved and result ~= false then
+        Runtime.settingsSavePending = false
+        Runtime.settingsFingerprint = Runtime.currentSettingsFingerprint()
+        return true
+    end
+    return false
+end
+
+function Runtime.autoSaveSettings(force)
+    local now = tonumber(getGameTimer()) or 0
+    if not force and now < (Runtime.nextSettingsAutoSave or 0) then
+        return
+    end
+    Runtime.nextSettingsAutoSave = now + 750
+    local currentFingerprint = Runtime.currentSettingsFingerprint()
+    if force or Runtime.settingsSavePending
+            or currentFingerprint ~= Runtime.settingsFingerprint then
+        saveSettings(force == true)
+    end
+end
+
+Runtime.settingsFingerprint = Runtime.currentSettingsFingerprint()
 
 local function smoothValue(current, target, speed, deltaTime)
     local factor = 1.0 - math.exp(-speed * deltaTime)
@@ -1207,6 +1342,7 @@ local function requestMenu(open)
         uiSet(windowOpen, true)
     else
         captureField = nil
+        Runtime.autoSaveSettings(true)
     end
 end
 
@@ -1343,19 +1479,65 @@ local function mutedText(text)
     imgui.TextColored(themes[config.settings.theme].muted, text)
 end
 
+function Runtime.wrappedColoredText(text, width, textColor, font)
+    -- Legacy MoonImGui can place automatically wrapped continuation lines on
+    -- half pixels. Build full lines first and draw every baseline at integer
+    -- coordinates so line two has exactly the same weight as line one.
+    local start = imgui.GetCursorScreenPos()
+    local startX = math.floor(start.x + 0.5)
+    local startY = math.floor(start.y + 0.5)
+    local maxWidth = math.floor(math.max(40, width or imgui.GetContentRegionAvail().x) + 0.5)
+    local lines = {}
+    local fontPushed = pushFont(font)
+
+    local content = tostring(text or ''):gsub('\r', '')
+    for paragraph in (content .. '\n'):gmatch('(.-)\n') do
+        local line = ''
+        local hasWords = false
+        for word in paragraph:gmatch('%S+') do
+            hasWords = true
+            local candidate = line == '' and word or (line .. ' ' .. word)
+            if line ~= '' and imgui.CalcTextSize(candidate).x > maxWidth then
+                lines[#lines + 1] = line
+                line = word
+            else
+                line = candidate
+            end
+        end
+        if line ~= '' then
+            lines[#lines + 1] = line
+        elseif not hasWords then
+            lines[#lines + 1] = ''
+        end
+    end
+    if #lines == 0 then
+        lines[1] = ''
+    end
+
+    local lineHeight = math.ceil(imgui.CalcTextSize('Ag').y) + 3
+    local drawList = imgui.GetWindowDrawList()
+    local packedColor = imgui.GetColorU32(textColor)
+    for index, line in ipairs(lines) do
+        drawList:AddText(imgui.ImVec2(startX, startY + (index - 1) * lineHeight), packedColor, line)
+    end
+    popFont(fontPushed)
+    imgui.Dummy(imgui.ImVec2(maxWidth, #lines * lineHeight))
+end
+
 local function mutedWrapped(text, width)
-    imgui.PushTextWrapPos(width or imgui.GetContentRegionAvail().x)
-    mutedText(text)
-    imgui.PopTextWrapPos()
+    Runtime.wrappedColoredText(text, width, themes[config.settings.theme].muted, uiFonts.body)
 end
 
 local function richWrappedText(text, width)
     local theme = themes[config.settings.theme]
     local start = imgui.GetCursorScreenPos()
     local drawList = imgui.GetWindowDrawList()
-    local maxWidth = math.max(40, width or imgui.GetContentRegionAvail().x)
-    local x, y = start.x, start.y
-    local lineHeight = imgui.CalcTextSize('Ag').y + 4
+    local maxWidth = math.floor(math.max(40, width or imgui.GetContentRegionAvail().x) + 0.5)
+    local startX = math.floor(start.x + 0.5)
+    local startY = math.floor(start.y + 0.5)
+    local x = startX
+    local y = startY
+    local lineHeight = math.ceil(imgui.CalcTextSize('Ag').y) + 4
     local bold = false
 
     for token in tostring(text or ''):gmatch('%S+') do
@@ -1372,11 +1554,11 @@ local function richWrappedText(text, width)
             local fontPushed = pushFont(bold and uiFonts.semibold or uiFonts.body)
             local word = token .. ' '
             local wordSize = imgui.CalcTextSize(word)
-            if x > start.x and x + wordSize.x > start.x + maxWidth then
-                x = start.x
+            if x > startX and x + wordSize.x > startX + maxWidth then
+                x = startX
                 y = y + lineHeight
             end
-            drawList:AddText(imgui.ImVec2(x, y),
+            drawList:AddText(imgui.ImVec2(math.floor(x + 0.5), y),
                 imgui.GetColorU32(bold and theme.text or theme.muted), word)
             x = x + wordSize.x
             popFont(fontPushed)
@@ -1385,7 +1567,7 @@ local function richWrappedText(text, width)
             bold = false
         end
     end
-    imgui.Dummy(imgui.ImVec2(maxWidth, (y - start.y) + lineHeight))
+    imgui.Dummy(imgui.ImVec2(maxWidth, (y - startY) + lineHeight))
 end
 
 local function sectionTitle(text)
@@ -1916,8 +2098,8 @@ local function extractGunOfferPlayerId(text)
 end
 
 local lastAutoAcceptAt = -2000
-if sampEventsAvailable and type(sampev) == 'table' then
-    function sampev.onServerMessage(_, text)
+function Runtime.bindServerMessageHandler(events)
+    function events.onServerMessage(_, text)
         if not config.settings.auto_accept_gun then
             return
         end
@@ -2815,11 +2997,7 @@ local function drawHome()
     imgui.SetCursorPos(imgui.ImVec2(66, 9))
     richWrappedText(tr('home_update_info'), width - 80)
     imgui.SetCursorPos(imgui.ImVec2(66, imgui.GetCursorPosY() + 1))
-    imgui.PushStyleColor(imgui.Col.Text, theme.blue)
-    imgui.PushTextWrapPos(width - 14)
-    imgui.Text(tr('home_update_future'))
-    imgui.PopTextWrapPos()
-    imgui.PopStyleColor()
+    Runtime.wrappedColoredText(tr('home_update_future'), width - 80, theme.blue, uiFonts.body)
     imgui.EndChild()
     imgui.PopStyleColor()
 
@@ -2886,7 +3064,163 @@ for _, weapon in ipairs(weaponOptions) do
     weaponComboParts[#weaponComboParts + 1] = weapon.name
 end
 local weaponComboString = table.concat(weaponComboParts, '\0') .. '\0\0'
-local numberComboString = table.concat({ '1', '2', '3', '4', '5' }, '\0') .. '\0\0'
+Runtime.numberComboParts = { '1', '2', '3', '4', '5' }
+local numberComboString = table.concat(Runtime.numberComboParts, '\0') .. '\0\0'
+
+function Runtime.standardCombo(id, selected, parts, packedItems, width)
+    -- Native Combo path retained for compact selectors such as numeric keys.
+    local widthPushed = uiItemWidth(width)
+    local changed
+    if legacyImgui then
+        changed = imgui.Combo(id, selected, parts)
+    else
+        changed = imgui.ComboStr(id, selected, packedItems)
+    end
+    uiEndItemWidth(widthPushed)
+    return changed
+end
+
+function Runtime.weaponCombo(id, selected, parts, packedItems, width)
+    -- A controlled popup avoids the legacy MoonImGui Combo bug where the list
+    -- scrolls but does not reliably report its hovered window. The visual frame
+    -- remains identical to the compact selector; wheel ownership is explicit.
+    if type(imgui.InvisibleButton) ~= 'function'
+            or type(imgui.OpenPopup) ~= 'function'
+            or type(imgui.BeginPopup) ~= 'function'
+            or type(imgui.EndPopup) ~= 'function'
+            or type(imgui.Selectable) ~= 'function' then
+        return Runtime.standardCombo(id, selected, parts, packedItems, width)
+    end
+    local theme = themes[config.settings.theme]
+    local currentIndex = clamp(math.floor(tonumber(uiGet(selected)) or 0), 0, #parts - 1)
+    local changed = false
+    local frameHeight = 27
+    local framePos = imgui.GetCursorScreenPos()
+    local clicked = imgui.InvisibleButton(id, imgui.ImVec2(width, frameHeight))
+    local hovered = imgui.IsItemHovered()
+    local drawList = imgui.GetWindowDrawList()
+    local frameColor = hovered and theme.controlHover or theme.control
+    drawList:AddRectFilled(framePos,
+        imgui.ImVec2(framePos.x + width, framePos.y + frameHeight),
+        imgui.GetColorU32(frameColor), 9)
+
+    local selectedLabel = parts[currentIndex + 1] or parts[1] or ''
+    local labelSize = imgui.CalcTextSize(selectedLabel)
+    drawList:AddText(imgui.ImVec2(framePos.x + 10,
+        framePos.y + math.floor((frameHeight - labelSize.y) / 2) - 1),
+        imgui.GetColorU32(theme.text), selectedLabel)
+    local chevronColor = imgui.GetColorU32(theme.muted)
+    local chevronX = framePos.x + width - 13
+    local chevronY = framePos.y + frameHeight / 2 - 1
+    drawList:AddLine(imgui.ImVec2(chevronX - 4, chevronY - 2),
+        imgui.ImVec2(chevronX, chevronY + 2), chevronColor, 1.4)
+    drawList:AddLine(imgui.ImVec2(chevronX, chevronY + 2),
+        imgui.ImVec2(chevronX + 4, chevronY - 2), chevronColor, 1.4)
+
+    local popupId = '##GHWeaponPopup' .. tostring(id)
+    if clicked then
+        imgui.OpenPopup(popupId)
+    end
+    imgui.SetNextWindowPos(imgui.ImVec2(framePos.x, framePos.y + frameHeight + 3),
+        imgui.Cond.Always)
+    imgui.SetNextWindowSize(imgui.ImVec2(width, math.min(214, #parts * 25 + 12)),
+        imgui.Cond.Always)
+    imgui.PushStyleVar(imgui.StyleVar.WindowPadding, imgui.ImVec2(6, 6))
+    if imgui.BeginPopup(popupId) then
+        Runtime.weaponPopupOpenThisFrame = true
+        -- Geometry is authoritative even while a Selectable is active.
+        local popupGeometryOk, popupHovered = pcall(function()
+            local popupPos = imgui.GetWindowPos()
+            local popupSize = imgui.GetWindowSize()
+            local mousePos = imgui.GetIO().MousePos
+            return mousePos.x >= popupPos.x and mousePos.x <= popupPos.x + popupSize.x
+                and mousePos.y >= popupPos.y and mousePos.y <= popupPos.y + popupSize.y
+        end)
+        Runtime.weaponPopupHoveredThisFrame = popupGeometryOk and popupHovered == true
+        if Runtime.weaponPopupHoveredThisFrame
+                and tonumber(Runtime.menuWheelDelta or 0) ~= 0 then
+            Runtime.weaponPopupConsumedWheel = true
+        end
+        for index, label in ipairs(parts) do
+            local isSelected = currentIndex == index - 1
+            if imgui.Selectable(label .. '##weaponOption' .. tostring(index), isSelected) then
+                uiSet(selected, index - 1)
+                changed = true
+                currentIndex = index - 1
+                if type(imgui.CloseCurrentPopup) == 'function' then
+                    pcall(imgui.CloseCurrentPopup)
+                end
+            end
+            if isSelected and type(imgui.SetItemDefaultFocus) == 'function' then
+                pcall(imgui.SetItemDefaultFocus)
+            end
+        end
+        if Runtime.weaponPopupHoveredThisFrame then
+            local ioWheelOk, ioWheel = pcall(function()
+                return tonumber(imgui.GetIO().MouseWheel) or 0
+            end)
+            -- When an old binding has already cleared ImGui's wheel value,
+            -- apply the still-available MoonLoader delta directly to this
+            -- popup. Do not duplicate ImGui's native scroll when it is intact.
+            if not ioWheelOk or ioWheel == 0 then
+                local popupWheel = tonumber(Runtime.menuWheelDelta or 0)
+                if popupWheel ~= 0 then
+                    pcall(function()
+                        local nextScroll = imgui.GetScrollY() - popupWheel * 34
+                        local maximum = type(imgui.GetScrollMaxY) == 'function'
+                            and imgui.GetScrollMaxY() or math.max(0, nextScroll)
+                        imgui.SetScrollY(clamp(nextScroll, 0, maximum))
+                    end)
+                end
+            end
+        end
+        imgui.EndPopup()
+    end
+    imgui.PopStyleVar()
+    return changed
+end
+
+function Runtime.mouseWheelSteps()
+    -- MoonLoader's native delta remains available even when an ImGui input,
+    -- checkbox or slider is active. Legacy ImGui may zero its own MouseWheel
+    -- value in those exact cases, which caused the inconsistent page scroll.
+    local nativeWheel = rawget(_G, 'getMousewheelDelta')
+    if type(nativeWheel) == 'function' then
+        local nativeOk, nativeDelta = pcall(nativeWheel)
+        nativeDelta = nativeOk and tonumber(nativeDelta) or 0
+        if nativeDelta and nativeDelta ~= 0 then
+            if math.abs(nativeDelta) >= 120 then
+                return nativeDelta / 120
+            end
+            return nativeDelta > 0 and 1 or -1
+        end
+    end
+    local ioOk, ioWheel = pcall(function()
+        return tonumber(imgui.GetIO().MouseWheel) or 0
+    end)
+    return ioOk and ioWheel or 0
+end
+
+function Runtime.currentWindowTreeHovered()
+    if type(imgui.IsWindowHovered) ~= 'function' then
+        return true
+    end
+    -- ImGuiHoveredFlags_ChildWindows is bit 0 in both the legacy binding and
+    -- mimgui. It makes the page count its nested cards/controls as hovered,
+    -- while a Combo/color popup remains a separate window and owns the wheel.
+    local childWindowsFlag = 1
+    pcall(function()
+        if imgui.HoveredFlags and imgui.HoveredFlags.ChildWindows ~= nil then
+            childWindowsFlag = imgui.HoveredFlags.ChildWindows
+        end
+    end)
+    local checked, hovered = pcall(imgui.IsWindowHovered, childWindowsFlag)
+    if checked then
+        return hovered == true
+    end
+    checked, hovered = pcall(imgui.IsWindowHovered)
+    return not checked or hovered == true
+end
 
 local function fillWeaponTemplate(template, weapon, playerId, playerName)
     local result = tostring(template or '')
@@ -3026,8 +3360,8 @@ local function dispatchShortcutAction(callback)
     end
 end
 
-if sampEventsAvailable and type(sampev) == 'table' then
-    function sampev.onSendCommand(command)
+function Runtime.bindCommandHandler(events)
+    function events.onSendCommand(command)
         if shortcutDispatching then
             return
         end
@@ -3140,34 +3474,22 @@ local function drawWeaponSlot(slot)
     end
 
     imgui.SetCursorPos(imgui.ImVec2(130, 8))
-    local weaponWidthPushed = uiItemWidth(272)
     local selectedWeapon = uiInt(weaponOptionIndex(config.settings[weaponField]) - 1)
-    local weaponChanged
-    if legacyImgui then
-        weaponChanged = imgui.Combo('##weaponSelect' .. slot, selectedWeapon, weaponComboParts)
-    else
-        weaponChanged = imgui.ComboStr('##weaponSelect' .. slot, selectedWeapon, weaponComboString)
-    end
+    local weaponChanged = Runtime.weaponCombo('##weaponSelect' .. slot, selectedWeapon,
+        weaponComboParts, weaponComboString, 272)
     if weaponChanged then
         config.settings[weaponField] = weaponOptions[uiGet(selectedWeapon) + 1].id
         saveSettings()
     end
-    uiEndItemWidth(weaponWidthPushed)
 
     imgui.SetCursorPos(imgui.ImVec2(414, 8))
-    local keyWidthPushed = uiItemWidth(math.max(86, width - 428))
     local selectedKey = uiInt(config.settings[keyField] - 49)
-    local keyChanged
-    if legacyImgui then
-        keyChanged = imgui.Combo('##weaponKey' .. slot, selectedKey, { '1', '2', '3', '4', '5' })
-    else
-        keyChanged = imgui.ComboStr('##weaponKey' .. slot, selectedKey, numberComboString)
-    end
+    local keyChanged = Runtime.standardCombo('##weaponKey' .. slot, selectedKey,
+        Runtime.numberComboParts, numberComboString, math.max(86, width - 428))
     if keyChanged then
         config.settings[keyField] = uiGet(selectedKey) + 49
         saveSettings()
     end
-    uiEndItemWidth(keyWidthPushed)
     imgui.PopStyleColor(comboStyleCount)
     imgui.EndChild()
     imgui.PopStyleColor()
@@ -3626,11 +3948,8 @@ local function drawFunctions()
     imgui.SetCursorPos(imgui.ImVec2(15, 235))
     mutedWrapped(tr('fps_unlocker_hint'), width - 30)
     imgui.SetCursorPos(imgui.ImVec2(15, imgui.GetCursorPosY() + 5))
-    imgui.PushStyleColor(imgui.Col.Text, color(239, 170, 55))
-    imgui.PushTextWrapPos(width - 15)
-    imgui.Text(tr('fps_warning'))
-    imgui.PopTextWrapPos()
-    imgui.PopStyleColor()
+    Runtime.wrappedColoredText(tr('fps_warning'), width - 30,
+        color(239, 170, 55), uiFonts.body)
     imgui.EndChild()
     imgui.PopStyleColor()
 
@@ -3708,6 +4027,22 @@ local function drawFunctions()
         config.settings.bullet_track_duration = bulletDurationValue
         saveSettings()
     end
+    imgui.SetCursorPos(imgui.ImVec2(15, 140))
+    local bulletCustomColor = uiBool(config.settings.bullet_custom_color)
+    if imgui.Checkbox(tr('bullet_track_custom_color') .. '##bullet_custom_color', bulletCustomColor) then
+        config.settings.bullet_custom_color = uiGet(bulletCustomColor)
+        saveSettings()
+    end
+    if config.settings.bullet_custom_color then
+        imgui.SetCursorPos(imgui.ImVec2(width - 178, 143))
+        mutedText(tr('bullet_track_color'))
+        imgui.SetCursorPos(imgui.ImVec2(width - 63, 136))
+        Runtime.drawColorPickerSetting(tr('bullet_track_color'), 'bullet',
+            Runtime.bulletColorPicker, 'BulletTrack', true)
+    else
+        imgui.SetCursorPos(imgui.ImVec2(width - 268, 143))
+        mutedText(tr('bullet_track_tab_color'))
+    end
     imgui.EndChild()
     imgui.PopStyleColor()
 
@@ -3775,7 +4110,7 @@ function Runtime.applyHexColor(prefix, picker, buffer)
     return true
 end
 
-local function drawColorPickerSetting(label, prefix, picker, id, compact)
+function Runtime.drawColorPickerSetting(label, prefix, picker, id, compact)
     local theme = themes[config.settings.theme]
     local popupId = '##colorPickerPopup' .. id
     local width, height = 48, 28
@@ -3904,12 +4239,12 @@ local function drawOverlaySettings()
     imgui.SetCursorPos(imgui.ImVec2(16, 49))
     mutedText(tr('normal_color'))
     imgui.SetCursorPos(imgui.ImVec2(16, 70))
-    drawColorPickerSetting(tr('keyboard_color') .. ' — ' .. tr('normal_color'),
+    Runtime.drawColorPickerSetting(tr('keyboard_color') .. ' — ' .. tr('normal_color'),
         'keyboard', keyboardColorPicker, 'KeyboardNormal', true)
     imgui.SetCursorPos(imgui.ImVec2(104, 49))
     mutedText(tr('pressed_color'))
     imgui.SetCursorPos(imgui.ImVec2(104, 70))
-    drawColorPickerSetting(tr('keyboard_color') .. ' — ' .. tr('pressed_color'),
+    Runtime.drawColorPickerSetting(tr('keyboard_color') .. ' — ' .. tr('pressed_color'),
         'keyboard_pressed', keyboardPressedColorPicker, 'KeyboardPressed', true)
     imgui.SetCursorPos(imgui.ImVec2(310, 49))
     local keyboardOpacityChanged, keyboardOpacityValue = slimSlider(tr('keyboard_opacity'), 'keyboardOpacity',
@@ -3932,12 +4267,12 @@ local function drawOverlaySettings()
     imgui.SetCursorPos(imgui.ImVec2(16, 49))
     mutedText(tr('normal_color'))
     imgui.SetCursorPos(imgui.ImVec2(16, 70))
-    drawColorPickerSetting(tr('mouse_color') .. ' — ' .. tr('normal_color'),
+    Runtime.drawColorPickerSetting(tr('mouse_color') .. ' — ' .. tr('normal_color'),
         'mouse', mouseColorPicker, 'MouseNormal', true)
     imgui.SetCursorPos(imgui.ImVec2(104, 49))
     mutedText(tr('pressed_color'))
     imgui.SetCursorPos(imgui.ImVec2(104, 70))
-    drawColorPickerSetting(tr('mouse_color') .. ' — ' .. tr('pressed_color'),
+    Runtime.drawColorPickerSetting(tr('mouse_color') .. ' — ' .. tr('pressed_color'),
         'mouse_pressed', mousePressedColorPicker, 'MousePressed', true)
     imgui.SetCursorPos(imgui.ImVec2(310, 49))
     local mouseOpacityChanged, mouseOpacityValue = slimSlider(tr('mouse_opacity'), 'mouseOpacity',
@@ -4080,6 +4415,10 @@ local pageTranslationKeys = {
 }
 
 local function initializeImguiTheme()
+    if Runtime.imguiThemeInitialized then
+        return
+    end
+    local initializationStartedAt = tonumber(getGameTimer()) or 0
     local io = imgui.GetIO()
     if not legacyImgui then
         io.IniFilename = nil
@@ -4093,8 +4432,8 @@ local function initializeImguiTheme()
         end
     end
     local regularFontCandidates = {
-        fontsDirectory .. '\\SegUIVar.ttf',
         fontsDirectory .. '\\segoeui.ttf',
+        fontsDirectory .. '\\SegUIVar.ttf',
         fontsDirectory .. '\\tahoma.ttf',
         fontsDirectory .. '\\arial.ttf'
     }
@@ -4116,38 +4455,57 @@ local function initializeImguiTheme()
     local semiboldFontPath = firstExistingFont(semiboldFontCandidates) or regularFontPath
 
     if regularFontPath and legacyImgui then
+        -- Use only three Windows-standard Segoe UI faces instead of the old
+        -- seven-font atlas. Romanian glyphs are explicitly included, Regular
+        -- remains the body face, and Semibold is limited to headings/actions.
         local ranges = nil
         if imgui.ImGlyphRanges then
-            local rangeCreated, rangeValue = pcall(imgui.ImGlyphRanges, { 0x0020, 0x024F, 0x2013, 0x2014 })
+            local rangeCreated, rangeValue = pcall(imgui.ImGlyphRanges, {
+                0x0020, 0x00FF,
+                0x0102, 0x0103,
+                0x0218, 0x021B,
+                0x2013, 0x2014,
+                0x2192, 0x2192
+            })
             if rangeCreated then
-                legacyRomanianGlyphRanges = rangeValue
-                ranges = legacyRomanianGlyphRanges
+                Runtime.legacyRomanianGlyphRanges = rangeValue
+                ranges = Runtime.legacyRomanianGlyphRanges
             end
         end
         io.Fonts:Clear()
-        uiFonts.body = io.Fonts:AddFontFromFileTTF(regularFontPath, 13.5, nil, ranges)
-        uiFonts.semibold = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 13.8, nil, ranges)
-        uiFonts.title = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 18.5, nil, ranges)
-        uiFonts.hero = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 22.0, nil, ranges)
-        overlayFonts.micro = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 6.4, nil, ranges)
-        overlayFonts.tiny = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 7.5, nil, ranges)
-        overlayFonts.small = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 9.0, nil, ranges)
-        overlayFonts.normal = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 10.5, nil, ranges)
+        uiFonts.body = io.Fonts:AddFontFromFileTTF(regularFontPath, 14.0, nil, ranges)
+        uiFonts.semibold = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 14.0, nil, ranges)
+        uiFonts.title = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 18.0, nil, ranges)
+        overlayFonts.micro = uiFonts.semibold
+        overlayFonts.tiny = uiFonts.semibold
+        overlayFonts.small = uiFonts.semibold
+        overlayFonts.normal = uiFonts.semibold
+        Runtime.legacySharedOverlayFontMode = true
         if imgui.RebuildFonts then
             imgui.RebuildFonts()
         end
+        print('[Gang Helper] startup font mode: Segoe UI Regular/Semibold (Romanian)')
     elseif regularFontPath then
-        uiFonts.body = io.Fonts:AddFontFromFileTTF(regularFontPath, 13.5, nil, romanianGlyphRanges)
-        uiFonts.semibold = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 13.8, nil, romanianGlyphRanges)
-        uiFonts.title = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 18.5, nil, romanianGlyphRanges)
-        uiFonts.hero = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 22.0, nil, romanianGlyphRanges)
-        overlayFonts.micro = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 6.4, nil, romanianGlyphRanges)
-        overlayFonts.tiny = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 7.5, nil, romanianGlyphRanges)
-        overlayFonts.small = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 9.0, nil, romanianGlyphRanges)
-        overlayFonts.normal = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 10.5, nil, romanianGlyphRanges)
+        uiFonts.body = io.Fonts:AddFontFromFileTTF(regularFontPath, 14.0, nil, romanianGlyphRanges)
+        uiFonts.semibold = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 14.0, nil, romanianGlyphRanges)
+        uiFonts.title = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 18.0, nil, romanianGlyphRanges)
+        overlayFonts.micro = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 6.4, nil, Runtime.asciiGlyphRanges)
+        overlayFonts.tiny = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 7.5, nil, Runtime.asciiGlyphRanges)
+        overlayFonts.small = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 9.0, nil, Runtime.asciiGlyphRanges)
+        overlayFonts.normal = io.Fonts:AddFontFromFileTTF(semiboldFontPath, 10.5, nil, Runtime.asciiGlyphRanges)
     end
 
     applyTheme(config.settings.theme)
+    Runtime.imguiThemeInitialized = true
+    local initializationFinishedAt = tonumber(getGameTimer()) or initializationStartedAt
+    local initializationDuration = initializationFinishedAt - initializationStartedAt
+    if initializationDuration < 0 then
+        initializationDuration = initializationDuration + 4294967296
+    end
+    if initializationDuration >= 100 then
+        print('[Gang Helper] font atlas initialization: '
+            .. tostring(initializationDuration) .. ' ms')
+    end
 end
 
 if not legacyImgui then
@@ -4245,11 +4603,7 @@ local function drawUpdateCenter(theme, notificationHovered)
     imgui.SetCursorPos(imgui.ImVec2(15, 52))
     local statusColor = Updater.available and color(239, 76, 76)
         or (Updater.state == 'error' and color(239, 105, 105) or theme.muted)
-    imgui.PushStyleColor(imgui.Col.Text, statusColor)
-    imgui.PushTextWrapPos(width - 15)
-    imgui.Text(updateStatusText())
-    imgui.PopTextWrapPos()
-    imgui.PopStyleColor()
+    Runtime.wrappedColoredText(updateStatusText(), width - 30, statusColor, uiFonts.body)
 
     if Updater.state == 'downloading' or Updater.state == 'installing' then
         local progressPosition = imgui.ImVec2(centerPos.x + 15, centerPos.y + 98)
@@ -4308,6 +4662,10 @@ local function drawUpdateCenter(theme, notificationHovered)
 end
 
 local function drawMainMenu()
+    -- Read the physical wheel once. The value is then assigned to exactly one
+    -- owner: the hovered weapon popup, otherwise the main page viewport.
+    Runtime.menuWheelDelta = Runtime.mouseWheelSteps()
+    Runtime.weaponPopupConsumedWheel = false
     local display = imgui.GetIO().DisplaySize
     imgui.SetNextWindowSize(imgui.ImVec2(UI_LAYOUT.menuWidth, UI_LAYOUT.menuHeight), imgui.Cond.Always)
     imgui.SetNextWindowPos(imgui.ImVec2(display.x / 2, display.y / 2),
@@ -4448,25 +4806,29 @@ local function drawMainMenu()
         local pageViewportWidth = UI_LAYOUT.contentWidth - UI_LAYOUT.pageHorizontalMargin * 2
         local pageViewportHeight = bodyHeight - UI_LAYOUT.pageTop - UI_LAYOUT.pageBottomMargin
         local pageViewportPos = imgui.GetCursorScreenPos()
+        Runtime.weaponPopupOpenThisFrame = false
+        Runtime.weaponPopupHoveredThisFrame = false
         imgui.BeginChild('##pageContent', imgui.ImVec2(
             pageViewportWidth, pageViewportHeight), false,
             imgui.WindowFlags.NoScrollWithMouse or 0)
         menuCheckpoint('page render started: ' .. tostring(currentPage))
         drawCurrentPage()
         menuCheckpoint('page rendered: ' .. tostring(currentPage))
-        -- The wheel belongs exclusively to page scrolling. Routing it here
-        -- makes scrolling work over checkboxes, sliders, buttons and every
-        -- fixed card, consistently across legacy imgui and mimgui.
-        local scrollOk, wheel, mouseX, mouseY = pcall(function()
+        -- Route by geometry, never by the hovered/active widget. This makes
+        -- the page scroll even while an InputText, checkbox, slider or card is
+        -- under the cursor (or has keyboard focus). The only exception is the
+        -- open Weapon Switch weapon popup under the cursor.
+        local scrollOk, mouseX, mouseY = pcall(function()
             local io = imgui.GetIO()
-            return tonumber(io.MouseWheel) or 0,
-                tonumber(io.MousePos.x), tonumber(io.MousePos.y)
+            return tonumber(io.MousePos.x), tonumber(io.MousePos.y)
         end)
+        local wheel = tonumber(Runtime.menuWheelDelta or 0)
         if scrollOk and wheel ~= 0 and mouseX and mouseY
                 and mouseX >= pageViewportPos.x
                 and mouseX <= pageViewportPos.x + pageViewportWidth
                 and mouseY >= pageViewportPos.y
-                and mouseY <= pageViewportPos.y + pageViewportHeight then
+                and mouseY <= pageViewportPos.y + pageViewportHeight
+                and not Runtime.weaponPopupConsumedWheel then
             pcall(function()
                 local nextScroll = imgui.GetScrollY() - wheel * 52
                 local maximum = type(imgui.GetScrollMaxY) == 'function'
@@ -4552,7 +4914,7 @@ if legacyImgui then
     imgui.LockPlayer = false
     function imgui.OnDrawFrame()
         imgui.ShowCursor = menuShouldRender()
-        if not overlayRendererFailed
+        if Runtime.clientReady and not overlayRendererFailed
                 and (config.settings.keyboard_overlay or config.settings.mouse_overlay)
                 and Runtime.renderInputOverlays then
             local rendered, renderError = pcall(Runtime.renderInputOverlays)
@@ -4614,6 +4976,75 @@ function Runtime.overlayPressedColors(prefix, alpha)
     return fill, Runtime.contrastImColor(red, green, blue, alpha)
 end
 
+function Runtime.readMouseMovement()
+    -- Use only input exposed by ImGui/MoonLoader. The previous diagnostic
+    -- build read a GTA memory address here; that native access is removed
+    -- completely because a protected Lua call cannot contain every access
+    -- violation produced by different input hooks/modpacks.
+    local ioOk, deltaX, deltaY = pcall(function()
+        local io = imgui.GetIO()
+        return tonumber(io.MouseDelta.x) or 0, tonumber(io.MouseDelta.y) or 0
+    end)
+    deltaX, deltaY = ioOk and deltaX or 0, ioOk and deltaY or 0
+
+    local cursorOk, cursorX, cursorY = pcall(getCursorPos)
+    cursorX, cursorY = cursorOk and tonumber(cursorX) or nil,
+        cursorOk and tonumber(cursorY) or nil
+    if cursorX and cursorY then
+        if math.abs(deltaX) < 0.001 and math.abs(deltaY) < 0.001
+                and Runtime.mouseLastCursorX and Runtime.mouseLastCursorY then
+            deltaX = cursorX - Runtime.mouseLastCursorX
+            deltaY = cursorY - Runtime.mouseLastCursorY
+        end
+        Runtime.mouseLastCursorX, Runtime.mouseLastCursorY = cursorX, cursorY
+    end
+    return clamp(deltaX, -160, 160), clamp(deltaY, -160, 160)
+end
+
+function Runtime.updateMouseDirection()
+    local now = tonumber(getGameTimer()) or 0
+    local previous = Runtime.mouseDirectionLastTick or now
+    Runtime.mouseDirectionLastTick = now
+    local deltaTime = clamp((now - previous) / 1000, 0.001, 0.050)
+    if not config.settings.mouse_overlay then
+        Runtime.mouseDirectionX, Runtime.mouseDirectionY = 0.0, 0.0
+        Runtime.mouseLastCursorX, Runtime.mouseLastCursorY = nil, nil
+        return
+    end
+    local targetX, targetY = Runtime.readMouseMovement()
+    if math.abs(targetX) < 0.05 then targetX = 0 end
+    if math.abs(targetY) < 0.05 then targetY = 0 end
+    local smoothing = 1.0 - math.exp(-24.0 * deltaTime)
+    Runtime.mouseDirectionX = Runtime.mouseDirectionX
+        + (targetX - Runtime.mouseDirectionX) * smoothing
+    Runtime.mouseDirectionY = Runtime.mouseDirectionY
+        + (targetY - Runtime.mouseDirectionY) * smoothing
+end
+
+function Runtime.drawMouseDirectionLine(drawList, x, y, width, scale, wheelHeight, gap)
+    local deltaX = tonumber(Runtime.mouseDirectionX) or 0
+    local deltaY = tonumber(Runtime.mouseDirectionY) or 0
+    local magnitude = math.sqrt(deltaX * deltaX + deltaY * deltaY)
+    if magnitude < 0.12 then
+        return
+    end
+    local maximumLength = 52 * scale
+    local visualX, visualY = deltaX * scale, deltaY * scale
+    local visualLength = math.sqrt(visualX * visualX + visualY * visualY)
+    if visualLength > maximumLength then
+        local ratio = maximumLength / visualLength
+        visualX, visualY = visualX * ratio, visualY * ratio
+    end
+    local originX = x + width / 2
+    local originY = y + 2 * scale + wheelHeight + gap + 21.5 * scale
+    local endX, endY = originX + visualX, originY + visualY
+    local lineColor = Runtime.overlayContrastImColor('mouse', 0.96)
+    drawList:AddLine(imgui.ImVec2(originX, originY), imgui.ImVec2(endX, endY),
+        imgui.GetColorU32(lineColor), math.max(1.25, 2.1 * scale))
+    drawList:AddCircleFilled(imgui.ImVec2(endX, endY), math.max(1.5, 2.8 * scale),
+        imgui.GetColorU32(lineColor), 16)
+end
+
 function Runtime.overlayDimensions(kind)
     local scale = config.settings.overlay_scale
     local gap = config.settings.overlay_spacing
@@ -4647,9 +5078,6 @@ end
 
 function Runtime.drawOverlayKey(drawList, label, keyCode, x, y, width, height, prefix, forcedPressed)
     local font = Runtime.currentOverlayFont()
-    if not font then
-        return
-    end
     -- ImGui's antialiased rounded rectangles keep all four corners identical;
     -- there are no overlapping polygons or scanlines at compact scales.
     x, y = math.floor(x) + 0.5, math.floor(y) + 0.5
@@ -4691,9 +5119,6 @@ function Runtime.drawOverlayKey(drawList, label, keyCode, x, y, width, height, p
 end
 
 function Runtime.drawKeyboardRenderOverlay(drawList)
-    if not Runtime.currentOverlayFont() then
-        return
-    end
     local scale = config.settings.overlay_scale
     local x, y = config.settings.keyboard_x, config.settings.keyboard_y
     local width = Runtime.overlayDimensions('keyboard')
@@ -4760,9 +5185,6 @@ function Runtime.drawKeyboardRenderOverlay(drawList)
 end
 
 function Runtime.drawMouseRenderOverlay(drawList)
-    if not Runtime.currentOverlayFont() then
-        return
-    end
     local scale = config.settings.overlay_scale
     local x, y = config.settings.mouse_x, config.settings.mouse_y
     local width = Runtime.overlayDimensions('mouse')
@@ -4798,6 +5220,7 @@ function Runtime.drawMouseRenderOverlay(drawList)
     rowX = rowX + 46 * scale + gap
     Runtime.drawOverlayKey(drawList, 'M5', 6,
         rowX, rowY, 42 * scale, 28 * scale, 'mouse')
+    Runtime.drawMouseDirectionLine(drawList, x, y, width, scale, wheelHeight, gap)
 end
 
 function Runtime.pointInside(x, y, left, top, width, height)
@@ -4865,12 +5288,27 @@ function Runtime.renderInputOverlays()
     imgui.PushStyleVar(imgui.StyleVar.WindowPadding, imgui.ImVec2(0, 0))
     imgui.PushStyleColor(imgui.Col.WindowBg, color(0, 0, 0, 0))
     imgui.Begin('##GangHelperInputOverlayCanvas', nil, flags)
+    local legacyFontScaleApplied = false
+    if legacyImgui and (Runtime.legacyDefaultFontMode
+            or Runtime.legacySharedOverlayFontMode)
+            and type(imgui.SetWindowFontScale) == 'function' then
+        -- Preserve the compact labels from the existing overlay while using
+        -- MoonImGui's prebuilt font instead of seven rebuilt font sizes.
+        local scale = config.settings.overlay_scale
+        local fontScale = scale <= 0.32 and 0.50
+            or (scale <= 0.45 and 0.58
+            or (scale <= 0.62 and 0.70 or 0.81))
+        legacyFontScaleApplied = pcall(imgui.SetWindowFontScale, fontScale)
+    end
     local drawList = imgui.GetWindowDrawList()
     if config.settings.keyboard_overlay then
         Runtime.drawKeyboardRenderOverlay(drawList)
     end
     if config.settings.mouse_overlay then
         Runtime.drawMouseRenderOverlay(drawList)
+    end
+    if legacyFontScaleApplied then
+        pcall(imgui.SetWindowFontScale, 1.0)
     end
     imgui.End()
     imgui.PopStyleColor()
@@ -4879,7 +5317,7 @@ end
 
 if not legacyImgui then
     Runtime.overlayFrame = imgui.OnFrame(function()
-        return not overlayRendererFailed
+        return Runtime.clientReady and not overlayRendererFailed
             and (config.settings.keyboard_overlay or config.settings.mouse_overlay)
     end, function()
         local rendered, renderError = pcall(Runtime.renderInputOverlays)
@@ -5099,8 +5537,6 @@ function Runtime.processWeaponSwitch()
             local weaponId = config.settings['weapon_slot_' .. slot]
             if weaponId > 0 and hasCharGotWeapon(PLAYER_PED, weaponId) then
                 setCurrentCharWeapon(PLAYER_PED, weaponId)
-            elseif weaponId > 0 then
-                ghChat(tr('no_weapon'))
             end
             return true
         end
@@ -5297,12 +5733,17 @@ function Runtime.setOptionalWorldFeature(name, value)
 end
 
 function Runtime.applySampFpsBoost(enabled)
+    enabled = enabled == true
+    if Runtime.fpsBoostApplied == enabled then
+        return
+    end
     -- Only local decorative effects are touched. Network players, SA-MP
     -- vehicles and server-controlled entities are never hidden or modified.
     pcall(function() switchRubbish(not enabled) end)
     Runtime.setOptionalWorldFeature('switchAmbientPlanes', not enabled)
     Runtime.setOptionalWorldFeature('setCloudsEnabled', not enabled)
     Runtime.setOptionalWorldFeature('setBirdsEnabled', not enabled)
+    Runtime.fpsBoostApplied = enabled
 end
 
 Runtime.restoreFpsFeatures = function()
@@ -5318,32 +5759,44 @@ Runtime.restoreFpsFeatures = function()
     Runtime.lastAppliedFpsLimit = nil
 end
 
-Runtime.applyFpsFeatures = function()
-    Runtime.captureFpsMemory()
-    Runtime.applySampFpsBoost(config.settings.fps_boost)
+Runtime.applyFpsFeatures = function(skipNativeScan)
     local removeCap = config.settings.fps_unlocker or config.settings.fps_lock
+    local enableBoost = config.settings.fps_boost == true
+    -- With every FPS option disabled, do not touch world switches or scan
+    -- samp.dll during connection. Restoring runs only after this script has
+    -- actually applied an FPS feature in the current session.
+    if not enableBoost and not removeCap and not Runtime.fpsFeaturesApplied then
+        return
+    end
+    Runtime.captureFpsMemory()
+    Runtime.applySampFpsBoost(enableBoost)
     if removeCap then
         Runtime.setFpsMemoryByte(Runtime.fpsLimiterFlag, 0)
-        Runtime.applySampFpsPatches()
+        if skipNativeScan then
+            Runtime.fpsNativePatchDeferred = true
+        else
+            Runtime.applySampFpsPatches()
+            Runtime.fpsNativePatchDeferred = false
+        end
     elseif Runtime.fpsOriginalMemory[Runtime.fpsLimiterFlag] ~= nil then
         Runtime.setFpsMemoryByte(Runtime.fpsLimiterFlag, Runtime.fpsOriginalMemory[Runtime.fpsLimiterFlag])
         Runtime.restoreSampFpsPatches()
     end
-    Runtime.fpsFeaturesApplied = config.settings.fps_boost or removeCap
+    Runtime.fpsFeaturesApplied = enableBoost or removeCap
 end
 
-Runtime.applyFpsLock = function(force)
+Runtime.applyFpsLock = function(force, skipNativeScan)
     if config.settings.fps_lock then
         local limit = math.floor(clamp(config.settings.fps_limit, 20, 100) + 0.5)
         if force or Runtime.lastAppliedFpsLimit ~= limit then
             Runtime.lastAppliedFpsLimit = limit
             Runtime.fpsLastCounter = nil
-            Runtime.applyFpsFeatures()
+            Runtime.applyFpsFeatures(skipNativeScan)
         end
     elseif Runtime.lastAppliedFpsLimit ~= nil then
         Runtime.lastAppliedFpsLimit = nil
         Runtime.fpsLastCounter = nil
-        Runtime.applyFpsFeatures()
+        Runtime.applyFpsFeatures(skipNativeScan)
     end
 end
 
@@ -5512,12 +5965,14 @@ function Runtime.playerTabColor(playerId)
     local byteD = bit.band(playerColor, 0xff)
     local red, green, blue
     if byteD == 0xff or byteA ~= 0xff then
-        -- SA-MP exposes player colors as RGBA on supported clients.
+        -- SA-MP normally exposes player colors as RGBA.
         red, green, blue = byteA, byteB, byteC
     else
-        -- Compatibility fallback for wrappers returning ARGB.
+        -- Compatibility fallback for wrappers that return ARGB.
         red, green, blue = byteB, byteC, byteD
     end
+    -- Very dark TAB colors are lifted only enough to remain visible; their
+    -- hue and player identity are preserved.
     local brightest = math.max(red, green, blue)
     if brightest > 0 and brightest < 72 then
         local scale = 72 / brightest
@@ -5648,7 +6103,16 @@ function Runtime.addBulletTrace(playerId, data)
         y = origin.y + unitY * traceLength,
         z = origin.z + unitZ * traceLength
     }
-    local red, green, blue = Runtime.playerTabColor(playerId)
+    local red, green, blue
+    if config.settings.bullet_custom_color then
+        red = clamp(math.floor(tonumber(config.settings.bullet_r) or 0), 0, 255)
+        green = clamp(math.floor(tonumber(config.settings.bullet_g) or 122), 0, 255)
+        blue = clamp(math.floor(tonumber(config.settings.bullet_b) or 255), 0, 255)
+    else
+        red, green, blue = Runtime.playerTabColor(playerId)
+    end
+    -- Store the resolved color with the shot so changing modes cannot recolor
+    -- a trace that is already visible.
     Runtime.bulletTraces[#Runtime.bulletTraces + 1] = {
         origin = origin,
         target = target,
@@ -5669,43 +6133,45 @@ function Runtime.addBulletTrace(playerId, data)
     end
 end
 
-if sampEventsAvailable and type(sampev) == 'table' then
-    function sampev.onSendBulletSync(data)
+function Runtime.bindGameplayEventHandlers(events)
+    function events.onSendBulletSync(data)
         Runtime.addBulletTrace(getLocalPlayerId(), data)
     end
 
-    function sampev.onBulletSync(playerId, data)
+    function events.onBulletSync(playerId, data)
         Runtime.addBulletTrace(playerId, data)
     end
 
-    function sampev.onSetPlayerTime(hour, minute)
+    function events.onSetPlayerTime(hour, minute)
         Runtime.lastServerHour = clamp(tonumber(hour) or 0, 0, 23)
         Runtime.lastServerMinute = clamp(tonumber(minute) or 0, 0, 59)
     end
 
-    function sampev.onSetWeather(weatherId)
+    function events.onSetWeather(weatherId)
         Runtime.lastServerWeather = clamp(tonumber(weatherId) or 0, 0, 255)
     end
 
-    function sampev.onGamemodeRestart()
+    function events.onGamemodeRestart()
         Runtime.scheduleReconnect('gamemode_restart', 500)
     end
 
-    function sampev.onConnectionNoFreeSlot()
+    function events.onConnectionNoFreeSlot()
         Runtime.scheduleReconnect('server_full')
     end
 
-    function sampev.onConnectionAttemptFailed()
+    function events.onConnectionAttemptFailed()
         Runtime.scheduleReconnect('attempt_failed')
     end
 
-    function sampev.onConnectionLost()
+    function events.onConnectionLost()
+        Runtime.connectionAccepted = false
         Runtime.injectionMessageShown = false
         Runtime.injectionMessageQueued = false
         Runtime.scheduleReconnect('connection_lost')
     end
 
-    function sampev.onConnectionClosed()
+    function events.onConnectionClosed()
+        Runtime.connectionAccepted = false
         Runtime.injectionMessageShown = false
         Runtime.injectionMessageQueued = false
         if getGameTimer() > (Runtime.suppressAutoReconnectUntil or 0) then
@@ -5713,7 +6179,8 @@ if sampEventsAvailable and type(sampev) == 'table' then
         end
     end
 
-    function sampev.onConnectionRequestAccepted()
+    function events.onConnectionRequestAccepted()
+        Runtime.connectionAccepted = true
         Runtime.reconnectPending = false
         Runtime.reconnectAttemptActive = false
         Runtime.reconnectStatus = 'idle'
@@ -5722,24 +6189,24 @@ if sampEventsAvailable and type(sampev) == 'table' then
         Runtime.queueInjectionMessage()
     end
 
-    function sampev.onConnectionBanned()
+    function events.onConnectionBanned()
         Runtime.reconnectPending = false
         Runtime.reconnectStatus = 'idle'
     end
 
-    function sampev.onConnectionPasswordInvalid()
+    function events.onConnectionPasswordInvalid()
         Runtime.reconnectPending = false
         Runtime.reconnectStatus = 'idle'
     end
 
-    function sampev.onSendDeathNotification()
+    function events.onSendDeathNotification()
         if config.settings.change_skin then
             Runtime.changeSkinDeathGraceUntil = getGameTimer() + 12000
             Runtime.changeSkinApplyPending = true
         end
     end
 
-    function sampev.onSendSpawn()
+    function events.onSendSpawn()
         Runtime.queueInjectionMessage()
         if config.settings.change_skin then
             Runtime.changeSkinDeathGraceUntil = getGameTimer() + 5000
@@ -5747,7 +6214,7 @@ if sampEventsAvailable and type(sampev) == 'table' then
         end
     end
 
-    function sampev.onSetPlayerSkin(playerId, skinId)
+    function events.onSetPlayerSkin(playerId, skinId)
         if tonumber(playerId) ~= getLocalPlayerId() or not Runtime.validSkinId(skinId) then
             return
         end
@@ -5765,6 +6232,38 @@ if sampEventsAvailable and type(sampev) == 'table' then
             end
         end
     end
+end
+
+function Runtime.loadSampEventsAfterHandshake()
+    if Runtime.sampEventsLoadAttempted then
+        return Runtime.sampEventsLoaded
+    end
+    Runtime.sampEventsLoadAttempted = true
+    local loaded, events = pcall(require, 'lib.samp.events')
+    sampEventsAvailable = loaded and type(events) == 'table'
+    if not sampEventsAvailable then
+        Runtime.sampEventsLoaded = false
+        config.settings.bullet_track = false
+        config.settings.ultra_fast_connect = false
+        config.settings.auto_accept_gun = false
+        print('[Gang Helper] SAMP.Events unavailable: ' .. tostring(events))
+        return false
+    end
+    Runtime.sampEvents = events
+    Runtime.bindServerMessageHandler(events)
+    Runtime.bindCommandHandler(events)
+    Runtime.bindGameplayEventHandlers(events)
+    Runtime.sampEventsLoaded = true
+    print('[Gang Helper] SAMP.Events attached after connection handshake')
+    return true
+end
+
+function Runtime.connectionHandshakeFinished()
+    local stateOk, state = pcall(sampGetGamestate)
+    state = stateOk and tonumber(state) or -1
+    -- MoonLoader/SAMPFUNCS builds expose either normalized states (2/3) or
+    -- SA-MP 0.3.7's native AWAIT_JOIN/CONNECTED values (15/14).
+    return state == 2 or state == 3 or state == 14 or state == 15
 end
 
 function Runtime.projectWorldPoint(point)
@@ -5802,6 +6301,14 @@ function Runtime.tracePoint(trace, progress)
     }
 end
 
+function Runtime.bulletHitContrast(trace)
+    local luminance = trace.red * 0.299 + trace.green * 0.587 + trace.blue * 0.114
+    if luminance >= 220 then
+        return 0, 0, 0
+    end
+    return 255, 255, 255
+end
+
 function Runtime.renderBulletTracks()
     if not config.settings.bullet_track then
         Runtime.bulletTraces = {}
@@ -5828,35 +6335,27 @@ function Runtime.renderBulletTracks()
                         or clamp((durationMs - age) / math.max(1, durationMs * 0.14), 0.0, 1.0)
                     local traceColor = Runtime.argb(math.floor(255 * fade),
                         trace.red, trace.green, trace.blue)
-                    local coreColor = trace.hitPlayer
-                        and Runtime.argb(math.floor(255 * fade), 255, 198, 62)
-                        or Runtime.argb(math.floor(220 * fade), 245, 245, 248)
-                    local shadowColor = Runtime.argb(math.floor(105 * fade), 0, 0, 0)
                     local emphasis = trace.targetsLocalPlayer and 1.20 or 1.0
-                    renderDrawLine(startX, startY, endX, endY,
-                        4.2 * emphasis, shadowColor)
-                    renderDrawLine(startX, startY, endX, endY,
-                        2.35 * emphasis, traceColor)
-                    renderDrawLine(startX, startY, endX, endY,
-                        trace.hitPlayer and 1.15 * emphasis or 0.72 * emphasis,
-                        coreColor)
                     if trace.hitPlayer then
-                        -- A player hit keeps the shooter's TAB color on the
-                        -- trajectory, while the impact itself is unmistakable.
+                        local hitRed, hitGreen, hitBlue = Runtime.bulletHitContrast(trace)
+                        local hitColor = Runtime.argb(math.floor(255 * fade),
+                            hitRed, hitGreen, hitBlue)
+                        -- Only confirmed player hits receive a second color:
+                        -- white for normal traces, black when the base is white.
+                        renderDrawLine(startX, startY, endX, endY,
+                            4.4 * emphasis, hitColor)
+                        renderDrawLine(startX, startY, endX, endY,
+                            2.35 * emphasis, traceColor)
                         pcall(renderDrawPolygon, endX, endY - 1,
-                            9.0 * emphasis, 9.0 * emphasis, 4, 45, shadowColor)
+                            8.0 * emphasis, 8.0 * emphasis, 8, 45, hitColor)
                         pcall(renderDrawPolygon, endX, endY - 1,
-                            7.0 * emphasis, 7.0 * emphasis, 4, 45, coreColor)
-                        pcall(renderDrawPolygon, endX, endY - 1,
-                            3.0 * emphasis, 3.0 * emphasis, 12, 0,
-                            Runtime.argb(math.floor(255 * fade), 255, 255, 255))
+                            4.6 * emphasis, 4.6 * emphasis, 8, 45, traceColor)
                     else
-                        -- Same crisp polygon endpoint used by the supplied
-                        -- btrack reference, now with a subtle bright center.
+                        -- A normal shot is intentionally one clean solid color.
+                        renderDrawLine(startX, startY, endX, endY,
+                            2.35 * emphasis, traceColor)
                         pcall(renderDrawPolygon, endX, endY - 1,
-                            5.5 * emphasis, 5.5 * emphasis, 8, 50, traceColor)
-                        pcall(renderDrawPolygon, endX, endY - 1,
-                            2.2 * emphasis, 2.2 * emphasis, 8, 50, coreColor)
+                            5.2 * emphasis, 5.2 * emphasis, 8, 50, traceColor)
                     end
                 end
             end
@@ -5866,6 +6365,7 @@ end
 
 addEventHandler('onScriptTerminate', function(scr)
     if scr == thisScript() then
+        Runtime.autoSaveSettings(true)
         restoreSensitivity()
         Runtime.restoreFpsFeatures()
         pcall(setPlayerNeverGetsTired, PLAYER_HANDLE, false)
@@ -5885,18 +6385,61 @@ addEventHandler('onScriptTerminate', function(scr)
     end
 end)
 
+function Runtime.timedStartupCall(label, callback)
+    local startedAt = tonumber(getGameTimer()) or 0
+    local executed, result = pcall(callback)
+    local finishedAt = tonumber(getGameTimer()) or startedAt
+    local duration = finishedAt - startedAt
+    if duration < 0 then
+        duration = duration + 4294967296
+    end
+    if duration >= 250 then
+        print('[Gang Helper] startup step "' .. tostring(label) .. '": '
+            .. tostring(duration) .. ' ms')
+    end
+    return executed, result
+end
+
 function main()
+    -- Do not build fonts, register commands, write chat lines, render overlays
+    -- or install packet hooks while the stock SA-MP client is negotiating its
+    -- first connection. Only a low-frequency read of the client state runs.
+    local themeInitialized, themeError = true, nil
+
     while not isSampAvailable() do
         wait(0)
     end
 
+    local connectionGateStartedAt = tonumber(getGameTimer()) or 0
+    while not Runtime.connectionHandshakeFinished() do
+        wait(50)
+    end
+    Runtime.connectionAccepted = true
+    Runtime.clientReady = true
+    local connectionGateFinishedAt = tonumber(getGameTimer()) or connectionGateStartedAt
+    local connectionGateDuration = connectionGateFinishedAt - connectionGateStartedAt
+    if connectionGateDuration < 0 then
+        connectionGateDuration = connectionGateDuration + 4294967296
+    end
+    print('[Gang Helper] passive connection gate: '
+        .. tostring(connectionGateDuration) .. ' ms')
+
+    -- The requested wait(0) remains: it is now the first frame after SA-MP has
+    -- accepted the server, which avoids touching the chat object in CONNECTING.
     sampRegisterChatCommand('gh', function()
         toggleMenu()
     end)
-    -- Do not wait for connection/spawn events: isSampAvailable() already
-    -- guarantees that the SA-MP chat API exists. queueInjectionMessage adds
-    -- the requested single wait(0) and sends both short lines immediately.
     Runtime.queueInjectionMessage()
+    wait(0)
+    wait(0)
+
+    -- Build the UI only after the message has been queued. This keeps font
+    -- atlas work out of both the handshake and the first chat frame.
+    if legacyImgui then
+        themeInitialized, themeError = Runtime.timedStartupCall(
+            'legacy theme', initializeImguiTheme)
+    end
+    Runtime.timedStartupCall('deferred SAMP.Events', Runtime.loadSampEventsAfterHandshake)
 
     if Updater.automaticChecksEnabled
             and config.settings.update_auto_check
@@ -5907,39 +6450,83 @@ function main()
         end)
     end
 
-    if legacyImgui then
-        local themeInitialized, themeError = pcall(initializeImguiTheme)
-        if not themeInitialized then
-            ghChat(tr('font_error') .. ' ' .. tostring(themeError))
-        end
+    if legacyImgui and not themeInitialized then
+        pcall(applyTheme, config.settings.theme)
+        ghChat(tr('font_error') .. ' ' .. tostring(themeError))
     end
 
-    local sensitivityInitialized = pcall(captureBaseSensitivity)
+    local sensitivityInitialized = Runtime.timedStartupCall(
+        'sensitivity capture', captureBaseSensitivity)
     if not sensitivityInitialized then
         sensitivityMemoryValid = false
     end
     if config.settings.sensitivity_fix and not sensitivityMemoryValid then
         config.settings.sensitivity_fix = false
-        saveSettings()
     end
 
-    pcall(setPlayerNeverGetsTired, PLAYER_HANDLE, config.settings.infinite_run)
-    Runtime.applyFpsFeatures()
-    Runtime.applyFpsLock(true)
+    if config.settings.infinite_run then
+        Runtime.timedStartupCall('Infinite Run', function()
+            setPlayerNeverGetsTired(PLAYER_HANDLE, true)
+        end)
+    end
+    if config.settings.fps_boost or config.settings.fps_lock or config.settings.fps_unlocker then
+        Runtime.timedStartupCall('FPS features', function()
+            -- Avoid copying and signature-scanning samp.dll in the connection
+            -- path. The safe GTA limiter byte and FPS boost are still restored;
+            -- native SA-MP patching runs only after an explicit UI change.
+            Runtime.applyFpsFeatures(true)
+            Runtime.applyFpsLock(true, true)
+        end)
+    end
     if config.settings.time_override then
-        Runtime.setTimeOverrideEnabled(true)
+        Runtime.timedStartupCall('Time override', function()
+            Runtime.timeOverrideStored = pcall(storeClock)
+            pcall(setTimeOfDay, math.floor(config.settings.time_hour), 0)
+        end)
     end
     if config.settings.weather_override then
-        Runtime.setWeatherOverrideEnabled(true)
+        Runtime.timedStartupCall('Weather override', function()
+            pcall(forceWeatherNow, math.floor(config.settings.weather_id))
+        end)
     end
     if config.settings.change_skin then
-        Runtime.setChangeSkinEnabled(true)
+        Runtime.timedStartupCall('Changeskin', function()
+            if Runtime.validSkinId(config.settings.change_skin_id) then
+                local modelOk, currentModel = pcall(getCharModel, PLAYER_PED)
+                if modelOk and Runtime.validSkinId(currentModel) then
+                    Runtime.lastServerSkin = currentModel
+                end
+                Runtime.changeSkinApplyPending = true
+                Runtime.changeSkinDeathGraceUntil = getGameTimer() + 8000
+            else
+                config.settings.change_skin = false
+            end
+        end)
     end
+
+    -- Discard startup-only normalization from the autosave queue. From this
+    -- point on, only an actual user change can make the fingerprint dirty.
+    Runtime.settingsSavePending = false
+    Runtime.settingsFingerprint = Runtime.currentSettingsFingerprint()
 
     while true do
         wait(0)
         Runtime.limitFrameRate()
         updateInterfaceAnimations()
+        Runtime.updateMouseDirection()
+        if not Runtime.settingsWritesAllowed then
+            local spawnOk, spawned = pcall(sampIsLocalPlayerSpawned)
+            local now = tonumber(getGameTimer()) or 0
+            if spawnOk and spawned then
+                if Runtime.settingsWriteUnlockAt == 0 then
+                    Runtime.settingsWriteUnlockAt = now + 2500
+                elseif now >= Runtime.settingsWriteUnlockAt then
+                    Runtime.settingsWritesAllowed = true
+                    print('[Gang Helper] settings writes unlocked after spawn')
+                end
+            end
+        end
+        Runtime.autoSaveSettings(false)
         if legacyImgui then
             imgui.Process = menuShouldRender()
                 or config.settings.keyboard_overlay or config.settings.mouse_overlay
