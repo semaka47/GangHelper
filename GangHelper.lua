@@ -264,10 +264,10 @@ local weapons = {
 }
 
 local tradeWeapons = {
-    { name = 'Deagle', command = 'deagle' },
-    { name = 'M4', command = 'm4' },
-    { name = 'Rifle', command = 'rifle' },
-    { name = 'Shotgun', command = 'shotgun' }
+    { name = 'Deagle', command = 'deagle', sellAlias = '/sdgl' },
+    { name = 'M4', command = 'm4', sellAlias = '/sm4' },
+    { name = 'Rifle', command = 'rifle', sellAlias = '/srif' },
+    { name = 'Shotgun', command = 'shotgun', sellAlias = '/ssg' }
 }
 
 local sensitivityWeapons = {
@@ -391,9 +391,9 @@ for _, weapon in ipairs(tradeWeapons) do
     local uppercaseName = weapon.name:upper()
     defaults.settings['request_' .. weapon.command .. '_ro'] = '<<< VREAU ' .. uppercaseName .. ', ID {id} >>>'
     defaults.settings['request_' .. weapon.command .. '_en'] = '<<< I WANT ' .. uppercaseName .. ', ID {id} >>>'
-    defaults.settings['sell_' .. weapon.command] = '/sellgun {id} ' .. weapon.command
+    defaults.settings['sell_' .. weapon.command] = '/sellgun {id} ' .. weapon.command .. ' 1'
     defaults.settings['request_alias_' .. weapon.command] = '/c' .. weapon.command
-    defaults.settings['sell_alias_' .. weapon.command] = '/v' .. weapon.command
+    defaults.settings['sell_alias_' .. weapon.command] = weapon.sellAlias
 end
 for slot = 1, 10 do
     defaults.settings['shortcut_full_' .. slot] = ''
@@ -561,9 +561,9 @@ local translations = {
         send = 'Trimite',
         cancel = 'Renunță',
         sellgun_distance = 'Distanță maximă pentru țintă',
-        sellgun_hint = 'Sunt acceptați jucătorii apropiați și stream-uiți care au un nume disponibil. Variabile: {id}, {weapon}, {name}.',
+        sellgun_hint = 'ID-ul celui mai apropiat jucător stream-uit este ales automat. Prețul este mereu 1. Exemplu: /sdgl -> /sellgun ID deagle 1.',
         sell_weapon = 'Vinde',
-        sell_no_target = 'nu există un jucător eligibil în apropiere sau numele este ascuns.',
+        sell_no_target = 'nu există un jucător stream-uit în raza configurată.',
         sell_target = 'ofertă pregătită pentru',
         request_sent = 'cerere trimisă',
         auto_accept_sent = 'oferta de armă a fost acceptată automat de la ID',
@@ -786,9 +786,9 @@ local translations = {
         send = 'Send',
         cancel = 'Cancel',
         sellgun_distance = 'Maximum target distance',
-        sellgun_hint = 'Nearby streamed players with an available name are accepted. Variables: {id}, {weapon}, {name}.',
+        sellgun_hint = 'The nearest streamed player ID is selected automatically. Price is always 1. Example: /sdgl -> /sellgun ID deagle 1.',
         sell_weapon = 'Sell',
-        sell_no_target = 'no eligible nearby player was found or the name is hidden.',
+        sell_no_target = 'no streamed player was found within the configured range.',
         sell_target = 'offer prepared for',
         request_sent = 'request sent',
         auto_accept_sent = 'gun offer automatically accepted from ID',
@@ -1066,6 +1066,14 @@ local function clampSettings()
         s[sellField] = tostring(s[sellField] or defaults.settings[sellField])
         s[requestAliasField] = tostring(s[requestAliasField] or defaults.settings[requestAliasField])
         s[sellAliasField] = tostring(s[sellAliasField] or defaults.settings[sellAliasField])
+        -- v2.1.5 hotfix: migrate the old incomplete sellgun command and the
+        -- legacy /v<weapon> aliases while preserving genuinely custom values.
+        if s[sellField] == '/sellgun {id} ' .. weapon.command then
+            s[sellField] = defaults.settings[sellField]
+        end
+        if s[sellAliasField] == '/v' .. weapon.command then
+            s[sellAliasField] = defaults.settings[sellAliasField]
+        end
         if s[roField] == '/f [<<< Am nevoie de ' .. weapon.name .. ', ID {id} >>>]' then
             s[roField] = defaults.settings[roField]
         end
@@ -3267,7 +3275,7 @@ local function findNearestVisiblePlayer(maxDistance)
     for playerId = 0, 1003 do
         if playerId ~= localId and sampIsPlayerConnected(playerId) then
             local streamed, ped = sampGetCharHandleBySampPlayerId(playerId)
-            if streamed and doesCharExist(ped) and playerHasUsableName(playerId) then
+            if streamed and doesCharExist(ped) then
                 local px, py, pz = getCharCoordinates(ped)
                 local dx, dy, dz = px - x, py - y, pz - z
                 local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
@@ -3315,8 +3323,14 @@ executeWeaponAction = function(actionType, weapon, template)
         end
     end
 
-    local weaponValue = actionType == 'sell' and weapon.command or weapon.name
-    local message = fillWeaponTemplate(template, weaponValue, playerId, playerName)
+    local message
+    if actionType == 'sell' then
+        -- /sellgun expects: /sellgun Name/ID Weapon Price. Use the nearest
+        -- player's numeric ID automatically and keep the price fixed at 1.
+        message = string.format('/sellgun %d %s 1', playerId, weapon.command)
+    else
+        message = fillWeaponTemplate(template, weapon.name, playerId, playerName)
+    end
     if message == '' then
         return
     end
@@ -3375,7 +3389,10 @@ function Runtime.bindCommandHandler(events)
             for _, actionType in ipairs({ 'request', 'sell' }) do
                 local aliasField = actionAliasFieldForWeapon(actionType, weapon)
                 local alias = normalizeShortcutAlias(config.settings[aliasField])
-                if alias ~= '' and outgoing == alias then
+                local canonicalSellAlias = actionType == 'sell'
+                    and normalizeShortcutAlias(weapon.sellAlias) or ''
+                if (alias ~= '' and outgoing == alias)
+                        or (canonicalSellAlias ~= '' and outgoing == canonicalSellAlias) then
                     local template = config.settings[actionFieldForWeapon(actionType, weapon)]
                     dispatchShortcutAction(function()
                         executeWeaponAction(actionType, weapon, template)
